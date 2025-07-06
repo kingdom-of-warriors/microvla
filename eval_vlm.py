@@ -25,12 +25,19 @@ def init_model(lm_config, device):
         state_dict = torch.load(ckp, map_location=device)
         model.load_state_dict({k: v for k, v in state_dict.items() if 'mask' not in k}, strict=False)
     else:
-        transformers_model_path = 'MiniMind2-Small-V'
+        transformers_model_path = 'MiniMind2-V'
         tokenizer = AutoTokenizer.from_pretrained(transformers_model_path)
         model = AutoModelForCausalLM.from_pretrained(transformers_model_path, trust_remote_code=True)
         model.vision_encoder, model.processor = MiniMindVLM.get_vision_model("./model/vision_model/clip-vit-base-patch16")
 
-    print(f'VLM参数量：{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f} 百万')
+    # 可训练参数
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    # 总参数（包括冻结的）
+    total_params = sum(p.numel() for p in model.parameters())
+    
+    print(f'VLM可训练参数量：{trainable_params / 1e6:.3f} 百万')
+    print(f'VLM总参数量：{total_params / 1e6:.3f} 百万')
+    print(f'冻结参数量：{(total_params - trainable_params) / 1e6:.3f} 百万')
 
     vision_model, preprocess = model.vision_encoder, model.processor
     return model.eval().to(device), tokenizer, vision_model.eval().to(device), preprocess

@@ -3,3 +3,7 @@ MiniMind2-V/
 model/vision_model/
 
 # datasets
+sft_data/
+
+# cache
+__pycache__/
