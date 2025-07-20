@@ -17,13 +17,27 @@ def count_parameters(model):
 
 def init_model(lm_config, device):
     tokenizer = AutoTokenizer.from_pretrained('./model')
+    # if args.load == 0:
+    #     moe_path = '_moe' if args.use_moe else ''
+    #     modes = {0: 'pretrain_vlm', 1: 'sft_vlm', 2: 'sft_vlm_multi'}
+    #     ckp = f'./{args.out_dir}/{modes[args.model_mode]}_{args.hidden_size}{moe_path}.pth'
+    #     model = MiniMindVLM(lm_config, vision_model_path="./model/vision_model/clip-vit-base-patch16")
+    #     state_dict = torch.load(ckp, map_location=device)
+    #     model.load_state_dict({k: v for k, v in state_dict.items() if 'mask' not in k}, strict=False)
     if args.load == 0:
-        moe_path = '_moe' if args.use_moe else ''
-        modes = {0: 'pretrain_vlm', 1: 'sft_vlm', 2: 'sft_vlm_multi'}
-        ckp = f'./{args.out_dir}/{modes[args.model_mode]}_{args.hidden_size}{moe_path}.pth'
+        transformers_model_path = 'MiniMind2-V'  # 或者您的model.bin所在目录
+        
         model = MiniMindVLM(lm_config, vision_model_path="./model/vision_model/clip-vit-base-patch16")
-        state_dict = torch.load(ckp, map_location=device)
+        
+        # 使用transformers的方式加载model.bin，然后提取state_dict
+        temp_model = AutoModelForCausalLM.from_pretrained(transformers_model_path, trust_remote_code=True)
+        state_dict = temp_model.state_dict()
+        
+        # 加载state_dict到您的MiniMindVLM模型
         model.load_state_dict({k: v for k, v in state_dict.items() if 'mask' not in k}, strict=False)
+        
+        # 清理临时模型
+        del temp_model
     else:
         transformers_model_path = 'MiniMind2-V'
         tokenizer = AutoTokenizer.from_pretrained(transformers_model_path)
@@ -62,8 +76,8 @@ if __name__ == "__main__":
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str)
     # MiniMind2-Small (26M)：(hidden_size=512, num_hidden_layers=8)
     # MiniMind2 (104M)：(hidden_size=768, num_hidden_layers=16)
-    parser.add_argument('--hidden_size', default=512, type=int)
-    parser.add_argument('--num_hidden_layers', default=8, type=int)
+    parser.add_argument('--hidden_size', default=768, type=int)
+    parser.add_argument('--num_hidden_layers', default=16, type=int)
     parser.add_argument('--max_seq_len', default=8192, type=int)
     parser.add_argument('--use_moe', default=False, type=bool)
     # 默认单图推理，设置为2为多图推理

@@ -82,19 +82,38 @@ class ActionTokenizer:
     @property
     def vocab_size(self) -> int:
         return self.n_bins
+    # 添加重要的 tokenizer 属性
+    @property
+    def bos_token_id(self):
+        """返回 BOS token ID"""
+        return self.tokenizer.bos_token_id
+    
+    @property
+    def eos_token_id(self):
+        """返回 EOS token ID"""
+        return self.tokenizer.eos_token_id
+    
+    @property
+    def pad_token_id(self):
+        """返回 PAD token ID"""
+        return self.tokenizer.pad_token_id
 
 
-class VLACofig(MiniMindConfig):
+class VLACofig(VLMConfig):
     model_type = "microvla"
 
     def __init__(
             self,
             image_special_token: str = '@' * 196,
             image_ids: List = [34] * 196,
+            map_path: str = 'model/action_token_map.json',
+            bins: int = 256,
             **kwargs,
     ):
         self.image_special_token = image_special_token
         self.image_ids = image_ids
+        self.map_path = map_path
+        self.bins = bins
         super().__init__(**kwargs)
 
 
@@ -105,7 +124,6 @@ class MicroVLA(MiniMindVLM):
         super().__init__(params, vision_model_path)
         if not params: params = VLACofig()
         self.params = params
-        self.action_tokenizer = ActionTokenizer(self.tokenizer, bins=128, min_action=-1, max_action=1)
 
     def forward(self,
                 input_ids: Optional[torch.Tensor] = None,    # [bs, seq_len]
@@ -120,36 +138,40 @@ class MicroVLA(MiniMindVLM):
 
         hidden_states = self.model.dropout(self.model.embed_tokens(input_ids)) # [bs, seq_len, hidden_size]
 
-        if pixel_values is not None and start_pos == 0:
-            if len(pixel_values.shape) == 6:
-                pixel_values = pixel_values.squeeze(2)
-            bs, num, c, im_h, im_w = pixel_values.shape
-            vision_features_list = []
-            for i in range(num):
-                img_features = MiniMindVLM.get_image_embeddings(pixel_values[:, i, :, :, :], self.vision_encoder)
-                vision_features_list.append(img_features)
-            vision_tensors = torch.cat(vision_features_list, dim=1)  # [bs, num_img*196, hidden_size]
-            
-            # 3. 按顺序拼接: <bos> + vision_features + remaining_tokens
-            hidden_states = torch.cat([
-                hidden_states[:, 0:1, :],           # [bs, 1, hidden_size]
-                vision_tensors,                     # [bs, num_img*196, hidden_size]
-                hidden_states[:, 1:, :]             # [bs, seq_len-1, hidden_size]
-            ], dim=1)                               # [bs, num_img*196+seq_len, hidden_size]
-            seq_length = hidden_states.shape[1]
-            
-            # 创建图像部分的 attention_mask (全为 1)
-            vision_attention_mask = torch.ones(
-                (batch_size, vision_tensors.shape[1]), 
-                dtype=attention_mask.dtype, 
-                device=attention_mask.device
-            )
-            # 拼接新的 attention_mask
-            attention_mask = torch.cat([
-                attention_mask[:, 0:1],          # <bos> 的 mask
-                vision_attention_mask,           # 图像 token 的 mask
-                attention_mask[:, 1:]            # 原始文本 token 的 mask
-            ], dim=1)
+        if len(pixel_values.shape) == 6:
+            pixel_values = pixel_values.squeeze(2)
+        bs, num, c, im_h, im_w = pixel_values.shape
+        vision_features_list = []
+        for i in range(num):
+            img_features = MicroVLA.get_image_embeddings(pixel_values[:, i, :, :, :], self.vision_encoder)
+            vision_features_list.append(img_features)
+        vision_tensors = torch.cat(vision_features_list, dim=1)  # [bs, num_img*196, hidden_size]
+
+        # 3. 按顺序拼接: <bos> + vision_features + remaining_tokens
+        hidden_states = torch.cat([
+            hidden_states[:, 0:1, :],           # [bs, 1, hidden_size]
+            vision_tensors,                     # [bs, num_img*196, hidden_size]
+            hidden_states[:, 1:, :]             # [bs, seq_len-1, hidden_size]
+        ], dim=1)                               # [bs, num_img*196+seq_len, hidden_size]
+        seq_length = hidden_states.shape[1]
+        
+        # 在attention map合并之前先弄好labels 将pad_token的位置设为IGNORE_INDEX
+        text_labels = input_ids[:, 1:].clone()
+        text_attention = attention_mask[:, 1:]
+        text_labels[text_attention == 0] = IGNORE_INDEX  # 将 pad 位置设为忽略
+
+        # 创建图像部分的 attention_mask (全为 1)
+        vision_attention_mask = torch.ones(
+            (batch_size, vision_tensors.shape[1]), 
+            dtype=attention_mask.dtype, 
+            device=attention_mask.device
+        )
+        # 拼接新的 attention_mask
+        attention_mask = torch.cat([
+            attention_mask[:, 0:1],          # <bos> 的 mask
+            vision_attention_mask,           # 图像 token 的 mask
+            attention_mask[:, 1:]            # 原始文本 token 的 mask
+        ], dim=1)
 
         position_embeddings = (
             self.model.freqs_cos[start_pos:start_pos + seq_length],
@@ -176,10 +198,11 @@ class MicroVLA(MiniMindVLM):
                     dtype=input_ids.dtype, device=input_ids.device),        # <BOS> token (忽略)
             torch.full((batch_size, num * 196), IGNORE_INDEX, 
                     dtype=input_ids.dtype, device=input_ids.device),        # Vision tokens (忽略)
-            input_ids[:, 1:],                                         # Text tokens and action tokens (参与loss)
+            text_labels,                                         # Text tokens and action tokens (参与loss)
         ], dim=1)
 
         # 实现时间错位
+        # import ipdb; ipdb.set_trace()
         shift_logits = logits[:, :-1, :].contiguous()    # 预测：位置 0 到 n-1
         shift_labels = full_labels[:, 1:].contiguous()   # 目标：位置 1 到 n
         
