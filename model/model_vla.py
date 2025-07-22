@@ -107,12 +107,14 @@ class VLACofig(VLMConfig):
             image_special_token: str = '@' * 196,
             image_ids: List = [34] * 196,
             map_path: str = 'model/action_token_map.json',
+            stats_path: str = 'dataset/stats.json',
             bins: int = 256,
             **kwargs,
     ):
         self.image_special_token = image_special_token
         self.image_ids = image_ids
         self.map_path = map_path
+        self.stats_path = stats_path
         self.bins = bins
         super().__init__(**kwargs)
 

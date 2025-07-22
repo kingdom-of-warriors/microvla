@@ -3,9 +3,9 @@
 ## 1. 图像数据优化
 
 ### 1.1 使用数据集特定的归一化参数
-- [ ] 从 `dataset/meta/stats.json` 读取图像统计信息
-- [ ] 替换 ImageNet 标准参数，使用数据集实际的 mean/std
-- [ ] 为主图像和手腕图像分别应用不同的归一化参数
+- [X] 从 `dataset/meta/stats.json` 读取图像统计信息
+- [X] 替换 ImageNet 标准参数，使用数据集实际的 mean/std
+- [X] 为主图像和手腕图像分别应用不同的归一化参数
 
 ```python
 # 当前使用 ImageNet 参数
@@ -19,9 +19,9 @@ wrist_std = [stats['wrist_image']['std'][i] for i in range(3)]
 ```
 
 ### 1.2 分别处理不同类型图像
-- [ ] 为主视角图像和手腕图像创建不同的 transform pipeline
-- [ ] 考虑两种图像可能有不同的光照、角度特性
-- [ ] 在 LiberoDataset 中支持多种 transform
+- [X] 为主视角图像和手腕图像创建不同的 transform pipeline
+- [X] 考虑两种图像可能有不同的光照、角度特性
+- [X] 在 LiberoDataset 中支持多种 transform
 
 ## 2. 动作数据优化
 

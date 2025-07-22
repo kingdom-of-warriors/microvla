@@ -1,7 +1,6 @@
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torchvision import transforms
 from tqdm import tqdm
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -109,7 +108,6 @@ def collate_fn(batch, action_tokenizer: ActionTokenizer, max_length: int = 256):
         input_ids_list.append(torch.tensor(input_ids, dtype=torch.long))
         attention_mask_list.append(torch.tensor(attention_mask, dtype=torch.long))
 
-    # 堆叠成批次
     batched_pixel_values = torch.stack(pixel_values_list)
     batched_input_ids = torch.stack(input_ids_list)
     batched_attention_mask = torch.stack(attention_mask_list)
@@ -126,14 +124,11 @@ def compute_action_metrics(outputs, batch, action_tokenizer: ActionTokenizer, nu
     """
     # 提取动作预测和真实标签
     # outputs.logits shape: [bs, seq_len, vocab_size] 跳过视觉token和BOS token，取到倒数第二个位置
-    # import ipdb; ipdb.set_trace()
     action_preds = outputs['logits'][:, 2 * num_vision_patches + 1:, ].argmax(dim=2)
     action_gt = batch['input_ids'][:, 1:].to(action_preds.device)
     
-    # 创建mask，识别动作token
-    action_token_ids = set(action_tokenizer.action_to_token_id.values())
-    
     # 创建mask来标识真正的动作token位置
+    action_token_ids = set(action_tokenizer.action_to_token_id.values())
     mask = torch.zeros_like(action_gt, dtype=torch.bool)
     for token_id in action_token_ids:
         mask |= (action_gt == token_id)
@@ -161,7 +156,6 @@ def train_vla():
     # --- 2. 初始化模型和分词器 ---
     model, action_tokenizer = init_trained_vlm(config)
     model = model.to(device)
-    # --- 输出模型参数统计 ---
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
 
@@ -174,17 +168,11 @@ def train_vla():
     print(f"可训练参数比例：{trainable_params / total_params * 100:.2f}%")
     print("=" * 30)
     # --- 3. 准备数据集 ---
-    hf_dataset = load_dataset("physical-intelligence/libero")['train']
-    train_hf_ds, val_hf_ds = split_dataset(hf_dataset)
+    dataset = load_dataset("physical-intelligence/libero")['train']
+    train_ds, val_ds = split_dataset(dataset)
 
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-
-    train_dataset = LiberoDataset(train_hf_ds, transform=transform)
-    val_dataset = LiberoDataset(val_hf_ds, transform=transform)
+    train_dataset = LiberoDataset(ds=train_ds)
+    val_dataset = LiberoDataset(ds=val_ds)
 
     train_loader = DataLoader(
         train_dataset,
