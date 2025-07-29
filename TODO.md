@@ -26,9 +26,9 @@ wrist_std = [stats['wrist_image']['std'][i] for i in range(3)]
 ## 2. 动作数据优化
 
 ### 2.1 处理极端动作值
-- [ ] 分析动作数据的分布特征（min/max/percentiles）
-- [ ] 使用 99 百分位数作为剪裁边界，避免极端异常值影响
-- [ ] 实现动作数据的健壮预处理
+- [X] 分析动作数据的分布特征（min/max/percentiles）
+- [X] 使用 99 百分位数作为剪裁边界，避免极端异常值影响
+- [X] 实现动作数据的健壮预处理
 
 ```python
 # 使用 99 百分位数替代绝对 min/max
