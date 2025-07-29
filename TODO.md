@@ -36,3 +36,24 @@ action_min_99 = np.percentile(actions, 1)   # 1% 百分位
 action_max_99 = np.percentile(actions, 99)  # 99% 百分位
 actions_clipped = np.clip(actions, action_min_99, action_max_99)
 ```
+
+## 3. 实现仅对 action token 的loss计算
+- [ ] 实现仅对 action token 的loss计算
+```python
+action_only_labels = text_labels.clone()
+action_mask = torch.zeros_like(action_only_labels, dtype=torch.bool)
+action_token_ids = set(action_tokenizer.action_to_token_id.values())
+for token_id in action_token_ids:
+    action_mask |= (action_only_labels == token_id)
+
+# 将非action tokens设为IGNORE_INDEX
+action_only_labels[~action_mask] = IGNORE_INDEX
+
+full_labels2 = torch.cat([
+    torch.full((batch_size, 1), IGNORE_INDEX, 
+            dtype=input_ids.dtype, device=input_ids.device),        # <BOS> token (忽略)
+    torch.full((batch_size, num * 196), IGNORE_INDEX, 
+            dtype=input_ids.dtype, device=input_ids.device),        # Vision tokens (忽略)
+    action_only_labels,                                  # 只有 Action tokens 参与loss，Text tokens被忽略
+], dim=1)
+```

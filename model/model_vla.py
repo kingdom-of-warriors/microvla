@@ -5,7 +5,7 @@ import warnings
 from .model_vlm import *
 from typing import Optional, Tuple, List
 from torch import nn
-from transformers import CLIPProcessor, CLIPModel, PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizerBase
 from typing import List
 
 warnings.filterwarnings('ignore')
@@ -21,68 +21,108 @@ IGNORE_INDEX = -100
 class ActionTokenizer:
     """
     一个动作分词器，使用预先计算好的、非连续的低频词元ID作为动作空间。
+    支持每个动作维度使用不同的最小值和最大值。
     """
     def __init__(
         self,
         tokenizer: PreTrainedTokenizerBase,
         action_token_map_path: str,
-        bins: int = 128,
-        min_action: float = -1.0,
-        max_action: float = 1.0
+        min_actions: List[float] = None,
+        max_actions: List[float] = None,
+        bins: int = 256,
     ) -> None:
         self.tokenizer = tokenizer
         self.n_bins = bins
-        self.min_action = min_action
-        self.max_action = max_action
+        self.min_actions = np.array(min_actions)
+        self.max_actions = np.array(max_actions)
+        self.action_dims = len(min_actions)
 
-        print(f"Loading action token map from: {action_token_map_path}")
         with open(action_token_map_path, 'r') as f:
             action_map_str_keys = json.load(f)
             self.action_to_token_id = {int(k): v for k, v in action_map_str_keys.items()}
-        
-        if len(self.action_to_token_id) != self.n_bins:
-            raise ValueError(
-                f"The number of tokens in the map ({len(self.action_to_token_id)}) "
-                f"does not match the specified number of bins ({self.n_bins})."
-            )
             
         self.token_id_to_action = {v: k for k, v in self.action_to_token_id.items()}
 
-        self.bins = np.linspace(self.min_action, self.max_action, self.n_bins)
-        self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
+        # 为每个动作维度创建bins和bin_centers
+        self.bins = []
+        self.bin_centers = []
+        for i in range(self.action_dims):
+            bins_i = np.linspace(self.min_actions[i], self.max_actions[i], self.n_bins)
+            bin_centers_i = (bins_i[:-1] + bins_i[1:]) / 2.0
+            self.bins.append(bins_i)
+            self.bin_centers.append(bin_centers_i)
+        
+        self.bins = np.array(self.bins)                # shape: [action_dims, n_bins]
+        self.bin_centers = np.array(self.bin_centers)  # shape: [action_dims, n_bins-1]
 
     def encode(self, action: np.ndarray) -> np.ndarray:
         """
         核心编码功能：将连续的动作值编码为对应的【词元ID数组】。
         这是用于模型训练的主要函数。
         """
-        action = np.clip(action, self.min_action, self.max_action)
-        discretized_action_bins = np.digitize(action, self.bins) - 1
-        discretized_action_bins = np.clip(discretized_action_bins, 0, self.n_bins - 1)
+        action = np.array(action)
+        if len(action.shape) == 1: # 单个动作: [action_dims]
+            action = action.reshape(1, -1)
+            is_single = True
+        else: is_single = False  # 批量动作: [batch_size, action_dims]
         
-        mapper = np.vectorize(self.action_to_token_id.get)
-        token_ids = mapper(discretized_action_bins)
+        batch_size, action_dims = action.shape
+        token_ids = np.zeros_like(action, dtype=int)
+        
+        for dim in range(action_dims):
+            clipped_action = np.clip(action[:, dim], self.min_actions[dim], self.max_actions[dim])
+            discretized_bins = np.digitize(clipped_action, self.bins[dim]) - 1
+            discretized_bins = np.clip(discretized_bins, 0, self.n_bins - 1)
+            mapper = np.vectorize(self.action_to_token_id.get)
+            token_ids[:, dim] = mapper(discretized_bins)
+        
+        # 恢复原始形状
+        if is_single:
+            token_ids = token_ids.squeeze(0)
         
         return token_ids
 
     def decode_token_ids_to_actions(self, action_token_ids: np.ndarray) -> np.ndarray:
-        mapper = np.vectorize(self.token_id_to_action.get)
-        discretized_actions = mapper(action_token_ids)
-        return self.bin_centers[discretized_actions]
+        """
+        将token IDs解码为动作值
+        """
+        action_token_ids = np.array(action_token_ids)
+        if len(action_token_ids.shape) == 1: # 单个动作: [action_dims]
+            action_token_ids = action_token_ids.reshape(1, -1)
+            is_single = True
+        else: is_single = False # 批量动作: [batch_size, action_dims]
+        
+        batch_size, action_dims = action_token_ids.shape
+        actions = np.zeros_like(action_token_ids, dtype=float)
+        
+        for dim in range(action_dims):
+            mapper = np.vectorize(self.token_id_to_action.get)
+            discretized_actions = mapper(action_token_ids[:, dim])
+            actions[:, dim] = self.bin_centers[dim][discretized_actions]
+        
+        # 恢复原始形状
+        if is_single:
+            actions = actions.squeeze(0)
+        
+        return actions
 
     def __call__(self, action: np.ndarray) -> Union[str, List[str]]:
         token_ids = self.encode(action)
-        is_batch = len(action.shape) > 1
+        is_batch = len(token_ids.shape) > 1
         
         if is_batch:
-            return self.tokenizer.batch_decode(token_ids.tolist(), skip_special_tokens=True)
+            batch_strings = []
+            for i in range(token_ids.shape[0]):
+                sample_tokens = token_ids[i].flatten().tolist()
+                batch_strings.append(self.tokenizer.decode(sample_tokens, skip_special_tokens=True))
+            return batch_strings
         else:
             return self.tokenizer.decode(token_ids.tolist(), skip_special_tokens=True)
 
     @property
     def vocab_size(self) -> int:
         return self.n_bins
-    # 添加重要的 tokenizer 属性
+    
     @property
     def bos_token_id(self):
         """返回 BOS token ID"""
@@ -108,6 +148,7 @@ class VLACofig(VLMConfig):
             image_ids: List = [34] * 196,
             map_path: str = 'model/action_token_map.json',
             stats_path: str = 'dataset/stats.json',
+            task_file_path: str = 'dataset/meta/tasks.jsonl',
             bins: int = 256,
             **kwargs,
     ):
@@ -116,6 +157,7 @@ class VLACofig(VLMConfig):
         self.map_path = map_path
         self.stats_path = stats_path
         self.bins = bins
+        self.task_file_path = task_file_path
         super().__init__(**kwargs)
 
 
@@ -134,7 +176,7 @@ class MicroVLA(MiniMindVLM):
                 use_cache: bool = False,
                 pixel_values: Optional[torch.FloatTensor] = None, # [bs, num, c, im_h, im_w]
                 **args):
-        batch_size, seq_length = input_ids.shape
+        batch_size, seq_length_text = input_ids.shape
         past_key_values = past_key_values or [None] * len(self.model.layers)
         start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
 
@@ -162,7 +204,7 @@ class MicroVLA(MiniMindVLM):
         text_attention = attention_mask[:, 1:]
         text_labels[text_attention == 0] = IGNORE_INDEX  # 将 pad 位置设为忽略
 
-        # 创建图像部分的 attention_mask (全为 1)
+        # 创建图像部分的 attention_mask
         vision_attention_mask = torch.ones(
             (batch_size, vision_tensors.shape[1]), 
             dtype=attention_mask.dtype, 
@@ -195,7 +237,7 @@ class MicroVLA(MiniMindVLM):
         logits = self.lm_head(hidden_states) # [bs, seq_len, vocab_size]
 
         # 构建完整的标签序列，包含text tokens和action tokens
-        full_labels = torch.cat([
+        full_labels1 = torch.cat([
             torch.full((batch_size, 1), IGNORE_INDEX, 
                     dtype=input_ids.dtype, device=input_ids.device),        # <BOS> token (忽略)
             torch.full((batch_size, num * 196), IGNORE_INDEX, 
@@ -203,10 +245,27 @@ class MicroVLA(MiniMindVLM):
             text_labels,                                         # Text tokens and action tokens (参与loss)
         ], dim=1)
 
+        # 创建action token mask
+        action_only_labels = text_labels.clone()
+        action_mask = torch.zeros_like(action_only_labels, dtype=torch.bool)
+        # action_token_ids = set(action_tokenizer.action_to_token_id.values())
+        # for token_id in action_token_ids:
+        #     action_mask |= (action_only_labels == token_id)
+        
+        # # 将非action tokens设为IGNORE_INDEX
+        # action_only_labels[~action_mask] = IGNORE_INDEX
+        
+        # full_labels2 = torch.cat([
+        #     torch.full((batch_size, 1), IGNORE_INDEX, 
+        #             dtype=input_ids.dtype, device=input_ids.device),        # <BOS> token (忽略)
+        #     torch.full((batch_size, num * 196), IGNORE_INDEX, 
+        #             dtype=input_ids.dtype, device=input_ids.device),        # Vision tokens (忽略)
+        #     action_only_labels,                                  # 只有 Action tokens 参与loss，Text tokens被忽略
+        # ], dim=1)
+
         # 实现时间错位
-        # import ipdb; ipdb.set_trace()
         shift_logits = logits[:, :-1, :].contiguous()    # 预测：位置 0 到 n-1
-        shift_labels = full_labels[:, 1:].contiguous()   # 目标：位置 1 到 n
+        shift_labels = full_labels1[:, 1:].contiguous()   # 目标：位置 1 到 n
         
         loss_fct = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
         loss = loss_fct(

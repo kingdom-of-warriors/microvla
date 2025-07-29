@@ -3,6 +3,8 @@ from torch.utils.data import Dataset
 import torch
 from torchvision import transforms
 import json
+import numpy as np
+from tqdm import tqdm
 
 # 1. 加载数据集
 ds = load_dataset("physical-intelligence/libero")['train']
@@ -20,14 +22,14 @@ def load_task_info(task_file_path):
 
 def load_stats(stats_path='dataset/meta/stats.json'):
     """
-    从stats.json文件加载图像统计信息
+    从stats.json文件加载统计信息
     """
     with open(stats_path, 'r', encoding='utf-8') as f: stats = json.load(f)
     image_mean = [stats['image']['mean'][i][0][0] for i in range(3)]
     image_std = [stats['image']['std'][i][0][0] for i in range(3)]
     wrist_mean = [stats['wrist_image']['mean'][i][0][0] for i in range(3)]
     wrist_std = [stats['wrist_image']['std'][i][0][0] for i in range(3)]
-    
+    actions_stats = stats['actions']
     return {
         'image': {
             'mean': image_mean,
@@ -36,15 +38,21 @@ def load_stats(stats_path='dataset/meta/stats.json'):
         'wrist_image': {
             'mean': wrist_mean,
             'std': wrist_std
+        },
+        'actions': {
+            '1st': actions_stats['1st_percentile'],
+            '99th': actions_stats['99th_percentile']
         }
     }
+
 
 # 3. 创建自定义PyTorch Dataset类
 class LiberoDataset(Dataset):
     def __init__(self, ds, task_file_path='dataset/meta/tasks.jsonl', stats_path='dataset/meta/stats.json'):
         self.dataset = ds
+        self.stats_path = stats_path
         self.task_info = load_task_info(task_file_path) # 加载任务信息
-        self.stats = load_stats(stats_path)
+        self.stats = load_stats(self.stats_path)
         self.main_tfs = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
@@ -96,29 +104,61 @@ class LiberoDataset(Dataset):
             # 'timestamp': timestamp,
             # 'index': sample['index']
         }
+    
+    # def compute_and_save_action_quantiles(self, quantiles=[1, 99]):
+    #     """
+    #     计算动作数据的分位数并保存到stats.json文件
+    #     quantiles: 要计算的分位数列表，例如 [1, 99]
+    #     stats_path: stats.json文件路径
+    #     """
+    #     stats_path = self.stats_path
+    #     total_samples = len(self.dataset)
+    #     all_actions = []
+        
+    #     for i in tqdm(range(total_samples), desc="Loading actions"):
+    #         sample = self.dataset[i]
+    #         actions = np.array(sample['actions'])
+    #         all_actions.append(actions)
+        
+    #     all_actions = np.array(all_actions)
+    #     print(f"Action data shape: {all_actions.shape}")
+        
+    #     # 计算每个维度的分位数
+    #     action_quantiles = {}
+    #     for q in quantiles: 
+    #         action_quantiles[f'{q}th_percentile'] = np.percentile(all_actions, q, axis=0).tolist()
+        
+    #     # 计算其他统计信息
+    #     action_quantiles['mean'] = np.mean(all_actions, axis=0).tolist()
+    #     action_quantiles['std'] = np.std(all_actions, axis=0).tolist()
+    #     action_quantiles['min'] = np.min(all_actions, axis=0).tolist()
+    #     action_quantiles['max'] = np.max(all_actions, axis=0).tolist()
+        
+    #     # 读取现有的stats.json
+    #     with open(stats_path, 'r', encoding='utf-8') as f:
+    #         stats_data = json.load(f)
 
-# 4. 测试任务信息加载
-if __name__ == "__main__":
-    task_info = load_task_info('dataset/meta/tasks.jsonl')
-    print("加载的任务信息示例：")
-    for i in range(5):
-        print(f"Task {i}: {task_info.get(i, 'Not found')}")
-    
-    # 测试数据集
-    from torchvision import transforms
-    
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-    
-    dataset = LiberoDataset(ds, transform=transform)
-    
-    # 查看数据示例
-    sample = dataset[1000]
-    print(f"\n数据示例 (index 1000):")
-    print(f"Task description: {sample['task_description']}")
-    print(f"Image shape: {sample['image'].shape}")
-    print(f"Actions shape: {sample['actions'].shape}")
-    print(f"State shape: {sample['state'].shape}")
+    #     # 更新actions部分
+    #     if 'actions' not in stats_data: stats_data['actions'] = {}
+    #     stats_data['actions'].update(action_quantiles)
+    #     with open(stats_path, 'w', encoding='utf-8') as f:
+    #         json.dump(stats_data, f, indent=4, ensure_ascii=False)
+        
+    #     print(f"Action quantiles saved to {stats_path}")
+        
+    #     # 打印结果
+    #     print("\nAction Statistics (7 dimensions):")
+    #     print("=" * 60)
+    #     for i in range(7):  # 假设有7个动作维度
+    #         print(f"Dim {i}:")
+    #         if '1st_percentile' in action_quantiles:
+    #             print(f"  1st percentile:  {action_quantiles['1st_percentile'][i]:.6f}")
+    #         if '99th_percentile' in action_quantiles:
+    #             print(f"  99th percentile: {action_quantiles['99th_percentile'][i]:.6f}")
+    #         print(f"  Mean:            {action_quantiles['mean'][i]:.6f}")
+    #         print(f"  Std:             {action_quantiles['std'][i]:.6f}")
+    #         print(f"  Min:             {action_quantiles['min'][i]:.6f}")
+    #         print(f"  Max:             {action_quantiles['max'][i]:.6f}")
+    #         print("-" * 40)
+        
+    #     return action_quantiles
