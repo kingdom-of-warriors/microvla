@@ -38,7 +38,7 @@ actions_clipped = np.clip(actions, action_min_99, action_max_99)
 ```
 
 ## 3. 实现仅对 action token 的loss计算
-- [ ] 实现仅对 action token 的loss计算
+- [X] 实现仅对 action token 的loss计算
 ```python
 action_only_labels = text_labels.clone()
 action_mask = torch.zeros_like(action_only_labels, dtype=torch.bool)
