@@ -164,10 +164,11 @@ class VLACofig(VLMConfig):
 class MicroVLA(MiniMindVLM):
     config_class = VLACofig
 
-    def __init__(self, params: VLACofig = None, vision_model_path="./model/vision_model/clip-vit-base-patch16"):
+    def __init__(self, params: VLACofig = None, vision_model_path="./model/vision_model/clip-vit-base-patch16", action_tokenizer: ActionTokenizer = None):
         super().__init__(params, vision_model_path)
         if not params: params = VLACofig()
         self.params = params
+        self.action_tokenizer = action_tokenizer
 
     def forward(self,
                 input_ids: Optional[torch.Tensor] = None,    # [bs, seq_len]
@@ -175,6 +176,7 @@ class MicroVLA(MiniMindVLM):
                 past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
                 use_cache: bool = False,
                 pixel_values: Optional[torch.FloatTensor] = None, # [bs, num, c, im_h, im_w]
+                use_text_token: bool = False,
                 **args):
         batch_size, seq_length_text = input_ids.shape
         past_key_values = past_key_values or [None] * len(self.model.layers)
@@ -248,24 +250,28 @@ class MicroVLA(MiniMindVLM):
         # 创建action token mask
         action_only_labels = text_labels.clone()
         action_mask = torch.zeros_like(action_only_labels, dtype=torch.bool)
-        # action_token_ids = set(action_tokenizer.action_to_token_id.values())
-        # for token_id in action_token_ids:
-        #     action_mask |= (action_only_labels == token_id)
+        action_token_ids = set(self.action_tokenizer.action_to_token_id.values())
+        for token_id in action_token_ids:
+            action_mask |= (action_only_labels == token_id)
         
-        # # 将非action tokens设为IGNORE_INDEX
-        # action_only_labels[~action_mask] = IGNORE_INDEX
+        # 将非action tokens设为IGNORE_INDEX
+        action_only_labels[~action_mask] = IGNORE_INDEX
         
-        # full_labels2 = torch.cat([
-        #     torch.full((batch_size, 1), IGNORE_INDEX, 
-        #             dtype=input_ids.dtype, device=input_ids.device),        # <BOS> token (忽略)
-        #     torch.full((batch_size, num * 196), IGNORE_INDEX, 
-        #             dtype=input_ids.dtype, device=input_ids.device),        # Vision tokens (忽略)
-        #     action_only_labels,                                  # 只有 Action tokens 参与loss，Text tokens被忽略
-        # ], dim=1)
+        full_labels2 = torch.cat([
+            torch.full((batch_size, 1), IGNORE_INDEX, 
+                    dtype=input_ids.dtype, device=input_ids.device),        # <BOS> token (忽略)
+            torch.full((batch_size, num * 196), IGNORE_INDEX, 
+                    dtype=input_ids.dtype, device=input_ids.device),        # Vision tokens (忽略)
+            action_only_labels,                                  # 只有 Action tokens 参与loss，Text tokens被忽略
+        ], dim=1)
 
         # 实现时间错位
+        full_labels = None
+        if use_text_token: full_labels = full_labels1
+        else: full_labels = full_labels2
+
         shift_logits = logits[:, :-1, :].contiguous()    # 预测：位置 0 到 n-1
-        shift_labels = full_labels1[:, 1:].contiguous()   # 目标：位置 1 到 n
+        shift_labels = full_labels[:, 1:].contiguous()   # 目标：位置 1 到 n
         
         loss_fct = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
         loss = loss_fct(

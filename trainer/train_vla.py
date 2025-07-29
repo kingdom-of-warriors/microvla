@@ -21,8 +21,14 @@ def init_trained_vlm(config: VLACofig, action_1st: List[float], action_99th: Lis
     """
     print("Initializing MicroVLA model...")
     tokenizer = AutoTokenizer.from_pretrained('./model')
+    # 设置tokenizer
+    action_tokenizer = ActionTokenizer(tokenizer=tokenizer,
+                                       action_token_map_path=config.map_path,
+                                       min_actions=action_1st,
+                                       max_actions=action_99th,
+                                       bins=config.bins)
     transformers_model_path = 'MiniMind2-V'
-    model = MicroVLA(config, vision_model_path="./model/vision_model/clip-vit-base-patch16")
+    model = MicroVLA(config, vision_model_path="./model/vision_model/clip-vit-base-patch16", action_tokenizer=action_tokenizer)
     
     # 加载预训练的VLM权重
     print("Loading pretrained VLM weights...")
@@ -33,14 +39,7 @@ def init_trained_vlm(config: VLACofig, action_1st: List[float], action_99th: Lis
     # 清理临时模型
     del vlm_state_dict
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
-    
-    # 设置tokenizer
-    action_tokenizer = ActionTokenizer(tokenizer=tokenizer,
-                                       action_token_map_path=config.map_path,
-                                       min_actions=action_1st,
-                                       max_actions=action_99th,
-                                       bins=config.bins)
-    
+
     print("VLM weights loaded successfully.")
     print("Model initialized.")
     return model, action_tokenizer
@@ -212,9 +211,10 @@ def train_vla():
             attention_mask = batch['attention_mask'].to(device)
             
             outputs = model(
-                pixel_values=pixel_values,
                 input_ids=input_ids,
-                attention_mask=attention_mask
+                attention_mask=attention_mask,
+                pixel_values=pixel_values,
+                use_text_token=False
             )
             
             loss = outputs['loss']
