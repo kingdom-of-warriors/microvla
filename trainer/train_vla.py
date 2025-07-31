@@ -217,7 +217,7 @@ def train_vla():
                 use_text_token=False
             )
             
-            loss = outputs['loss']
+            loss = outputs.loss
             loss.backward()
             optimizer.step()
             

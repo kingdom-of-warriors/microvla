@@ -9,3 +9,5 @@ sft_data/
 __pycache__/
 LIBERO/
 .vscode/
+eval_results/
+eval_videos/

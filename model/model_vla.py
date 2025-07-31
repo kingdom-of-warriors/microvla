@@ -5,7 +5,6 @@ import warnings
 from .model_vlm import *
 from typing import Optional, Tuple, List
 from torch import nn
-from transformers import PreTrainedTokenizerBase
 from typing import List
 
 warnings.filterwarnings('ignore')
@@ -14,8 +13,6 @@ import json
 import numpy as np
 from transformers import PreTrainedTokenizerBase
 from typing import List, Union
-
-# HuggingFace Default / LLaMa-2 IGNORE_INDEX (for labels)
 IGNORE_INDEX = -100
 
 class ActionTokenizer:
@@ -279,7 +276,69 @@ class MicroVLA(MiniMindVLM):
             shift_labels.view(-1)
         )
         self.OUT.__setitem__('loss', loss)
-        self.OUT.__setitem__('last_hidden_state', hidden_states)
+        self.OUT.__setitem__('hidden_states', hidden_states)
         self.OUT.__setitem__('logits', logits)
         self.OUT.__setitem__('past_key_values', presents)
         return self.OUT
+
+
+    @torch.no_grad()
+    def predict_action(self, pixel_values: torch.FloatTensor, task_description: str):
+        """
+        使用 VLA 模型【自回归地】预测一个完整的动作序列。
+        此版本集成了所有修正：作为类方法、使用KV缓存、且只在有效动作空间内解码。
+        """
+        device = self.device 
+        batch_size = pixel_values.shape[0]
+        action_dims = self.action_tokenizer.action_dims
+
+        # 1. 准备初始的文本输入: <bos> + instruction
+        instruction_ids = self.action_tokenizer.tokenizer.encode(
+            task_description, add_special_tokens=False, return_tensors='pt'
+        ).to(device)
+        input_ids = instruction_ids.repeat(batch_size, 1)
+
+        bos_id = self.action_tokenizer.bos_token_id
+        bos_tensor = torch.full((batch_size, 1), bos_id, device=device)
+        input_ids = torch.cat([bos_tensor, input_ids], dim=1)
+
+        past_key_values = None
+        generated_action_ids = []
+        
+        # 预先获取有效的动作token ID列表
+        action_token_ids_list = list(self.action_tokenizer.action_to_token_id.values())
+        action_token_ids_tensor = torch.tensor(action_token_ids_list, device=device)
+
+        # 2. 自回归生成N个动作token
+        for _ in range(action_dims):
+            attention_mask = torch.ones_like(input_ids)
+            outputs = self(
+                pixel_values=pixel_values,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+
+            next_token_logits = outputs.logits[:, -1, :]
+
+            # 约束解码：只在有效动作空间内选择 ---
+            action_logits = torch.index_select(next_token_logits, dim=1, index=action_token_ids_tensor)
+            best_action_index = torch.argmax(action_logits, dim=-1)
+            predicted_token_id = action_token_ids_tensor[best_action_index]
+            
+            generated_action_ids.append(predicted_token_id.unsqueeze(1))
+            input_ids = predicted_token_id.unsqueeze(1)
+            past_key_values = outputs.past_key_values
+            # 在第一次迭代后，不再需要传入图像，其信息已在past_key_values中
+            pixel_values = None 
+
+        # 3. 将所有生成的动作token ID拼接起来
+        action_token_ids_tensor = torch.cat(generated_action_ids, dim=1)
+
+        # 4. 一次性将token ID解码为连续动作
+        actions_np = self.action_tokenizer.decode_token_ids_to_actions(
+            action_token_ids_tensor.cpu().numpy()
+        )
+        
+        return actions_np
