@@ -1,12 +1,13 @@
 import argparse
 import os
 import sys
-import ipdb.stdout
 import numpy as np
 import torch
 from tqdm import tqdm
 import json
 from transformers import AutoTokenizer
+from torchvision import transforms
+from PIL import Image
 
 # 添加项目路径
 current_dir = os.path.dirname(__file__)
@@ -69,7 +70,6 @@ def load_vla_model(checkpoint_path, model_config_path, device):
         vision_model_path="./model/vision_model/clip-vit-base-patch16",
         action_tokenizer=action_tokenizer
     )
-    # =======================================================
     print(f"Loading checkpoint from {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint, strict=False)
@@ -78,24 +78,39 @@ def load_vla_model(checkpoint_path, model_config_path, device):
     model.eval()
     
     print("VLA model loaded successfully.")
-    # 现在只需要返回 model 即可，因为 action_tokenizer 已经在 model 内部
     return model
 
 def raw_obs_to_tensor_obs(obs, device):
     """将【单个】原始观测转换为模型输入格式（batch_size=1）。"""
-    # obs 现在是一个字典, 而不是列表
-    agentview_img = torch.from_numpy(obs['agentview_image']).float() / 255.0
-    agentview_img = agentview_img.permute(2, 0, 1)  # (3, H, W)
-    # agentview_img = agentview_img[::-1]
-
-    wrist_img = torch.from_numpy(obs['robot0_eye_in_hand_image']).float() / 255.0
-    wrist_img = wrist_img.permute(2, 0, 1)  # (3, H, W)
-    # wrist_img = wrist_img[::-1]
+    # 定义与训练时相同的变换
+    stats = load_stats('dataset/meta/stats.json')
+    main_tfs = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=stats['image']['mean'],      # [0.485, 0.456, 0.406]
+            std=stats['image']['std']         # [0.229, 0.224, 0.225]
+        )
+    ])
     
-    # 堆叠成 [2, 3, H, W]
+    wrist_tfs = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=stats['wrist_image']['mean'], # [0.512, 0.398, 0.321]
+            std=stats['wrist_image']['std']    # [0.201, 0.189, 0.243]
+        )
+    ])
+    
+    agentview_img = obs['agentview_image'][::-1].copy()
+    agentview_img = Image.fromarray(agentview_img.astype('uint8'))
+    agentview_img = main_tfs(agentview_img)
+
+    wrist_img = obs['robot0_eye_in_hand_image'][::-1].copy()
+    wrist_img = Image.fromarray(wrist_img.astype('uint8'))
+    wrist_img = wrist_tfs(wrist_img)
+
+    # 堆叠成 [2, 3, H, W] 并添加 batch 维度
     pixel_values = torch.stack([agentview_img, wrist_img])
     
-    # 添加 batch 维度，变为 [1, 2, 3, H, W]
     return pixel_values.unsqueeze(0).to(device)
 
 
@@ -131,22 +146,20 @@ def evaluate_task(model: MicroVLA, task, args):
             init_state = init_states[init_state_idx]
             obs = env.set_init_state(init_state)
 
-            for _ in range(5):
-                obs, _, _, _ = env.step(np.zeros(7))
-            
-            # done 状态在循环开始前认为是 False
+            for _ in range(5): obs, _, _, _ = env.step(np.zeros(7))
             done = False
 
             if args.save_videos:
-                # 调用 append_obs，对于单环境，idx总是0
                 video_writer.append_obs(obs, done, idx=0, camera_name="agentview_image")
 
             for step in range(args.max_steps):
                 pixel_values = raw_obs_to_tensor_obs(obs, args.device)
-                
-                actions_batch = model.predict_action(pixel_values, "把字母汤和番茄酱都放进篮子里")
-                action = actions_batch[0]
-
+                # actions_batch1 = model.predict_action_kv_cache(pixel_values, task.language)
+                actions_batch2 = model.predict_action(pixel_values, task.language)
+                # action1 = actions_batch1[0]
+                action2 = actions_batch2[0]
+                action = action2
+                print(action)
                 obs, reward, done, info = env.step(action)
                 total_steps += 1
                 

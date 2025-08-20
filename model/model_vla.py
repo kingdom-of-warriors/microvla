@@ -95,6 +95,7 @@ class ActionTokenizer:
         for dim in range(action_dims):
             mapper = np.vectorize(self.token_id_to_action.get)
             discretized_actions = mapper(action_token_ids[:, dim])
+            discretized_actions = np.clip(discretized_actions, 0, self.bin_centers.shape[1] - 1) # 防止溢出
             actions[:, dim] = self.bin_centers[dim][discretized_actions]
         
         # 恢复原始形状
@@ -167,123 +168,139 @@ class MicroVLA(MiniMindVLM):
         self.params = params
         self.action_tokenizer = action_tokenizer
 
-    def forward(self,
-                input_ids: Optional[torch.Tensor] = None,    # [bs, seq_len]
-                attention_mask: Optional[torch.Tensor] = None, 
-                past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
-                use_cache: bool = False,
-                pixel_values: Optional[torch.FloatTensor] = None, # [bs, num, c, im_h, im_w]
-                use_text_token: bool = False,
-                **args):
-        batch_size, seq_length_text = input_ids.shape
+    def forward(self, 
+                input_ids: Optional[torch.Tensor] = None,    # [bs, seq_len] 
+                attention_mask: Optional[torch.Tensor] = None,  
+                past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None, 
+                use_cache: bool = False, 
+                pixel_values: Optional[torch.FloatTensor] = None, # [bs, num, c, im_h, im_w] 
+                use_text_token: bool = False, 
+                **args): 
+        
+        # --- KV Cache 设置 ---
         past_key_values = past_key_values or [None] * len(self.model.layers)
         start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
+        
+        loss = None
+        # 这是实现 KV 缓存的核心。根据 start_pos 判断是预填充还是解码步骤。
+        if start_pos == 0:
+            # === 预填充 / 训练阶段 ===
+            # 在此阶段，处理所有输入（图像+文本）并构建初始的 KV 缓存。
+            # 1. 获取文本嵌入
+            hidden_states = self.model.dropout(self.model.embed_tokens(input_ids)) # [bs, seq_len, hidden_size] 
 
-        hidden_states = self.model.dropout(self.model.embed_tokens(input_ids)) # [bs, seq_len, hidden_size]
+            # 2. 获取图像嵌入
+            if len(pixel_values.shape) == 6: 
+                pixel_values = pixel_values.squeeze(2) 
+            bs, num, c, im_h, im_w = pixel_values.shape 
+            vision_features_list = [] 
+            for i in range(num): 
+                img_features = MicroVLA.get_image_embeddings(pixel_values[:, i, :, :, :], self.vision_encoder) 
+                if bs == 1: img_features = img_features.unsqueeze(0) # 补上bs维度
+                vision_features_list.append(img_features) 
+            vision_tensors = torch.cat(vision_features_list, dim=1)  # [bs, num_img*196, hidden_size] 
 
-        if len(pixel_values.shape) == 6:
-            pixel_values = pixel_values.squeeze(2)
-        bs, num, c, im_h, im_w = pixel_values.shape
-        vision_features_list = []
-        for i in range(num):
-            img_features = MicroVLA.get_image_embeddings(pixel_values[:, i, :, :, :], self.vision_encoder)
-            vision_features_list.append(img_features)
-        vision_tensors = torch.cat(vision_features_list, dim=1)  # [bs, num_img*196, hidden_size]
-
-        # 3. 按顺序拼接: <bos> + vision_features + remaining_tokens
-        hidden_states = torch.cat([
-            hidden_states[:, 0:1, :],           # [bs, 1, hidden_size]
-            vision_tensors,                     # [bs, num_img*196, hidden_size]
-            hidden_states[:, 1:, :]             # [bs, seq_len-1, hidden_size]
-        ], dim=1)                               # [bs, num_img*196+seq_len, hidden_size]
+            # 3. 按顺序拼接: <bos> + vision_features + remaining_tokens 
+            hidden_states = torch.cat([ 
+                hidden_states[:, 0:1, :],        # [bs, 1, hidden_size] 
+                vision_tensors,                  # [bs, num_img*196, hidden_size] 
+                hidden_states[:, 1:, :]          # [bs, seq_len-1, hidden_size] 
+            ], dim=1)
+            
+            # 4. 创建对应的拼接后 attention_mask
+            batch_size = hidden_states.shape[0]
+            vision_attention_mask = torch.ones( 
+                (batch_size, vision_tensors.shape[1]),  
+                dtype=attention_mask.dtype,  
+                device=attention_mask.device 
+            ) 
+            attention_mask = torch.cat([ 
+                attention_mask[:, 0:1],          # <bos> 的 mask 
+                vision_attention_mask,           # 图像 token 的 mask 
+                attention_mask[:, 1:]            # 原始文本 token 的 mask 
+            ], dim=1)
+            
+        else:
+            # === 解码阶段 ===
+            # 利用已有的 KV 缓存，只需处理新的 token(s)
+            # `input_ids` 此时通常形状为 [bs, 1]
+            hidden_states = self.model.dropout(self.model.embed_tokens(input_ids))
+            # `attention_mask` 应该由外部的生成循环更新并传入
+        
         seq_length = hidden_states.shape[1]
-        
-        # 在attention map合并之前先弄好labels 将pad_token的位置设为IGNORE_INDEX
-        text_labels = input_ids[:, 1:].clone()
-        text_attention = attention_mask[:, 1:]
-        text_labels[text_attention == 0] = IGNORE_INDEX  # 将 pad 位置设为忽略
+        position_embeddings = ( 
+            self.model.freqs_cos[start_pos : start_pos + seq_length], 
+            self.model.freqs_sin[start_pos : start_pos + seq_length] 
+        ) 
 
-        # 创建图像部分的 attention_mask
-        vision_attention_mask = torch.ones(
-            (batch_size, vision_tensors.shape[1]), 
-            dtype=attention_mask.dtype, 
-            device=attention_mask.device
-        )
-        # 拼接新的 attention_mask
-        attention_mask = torch.cat([
-            attention_mask[:, 0:1],          # <bos> 的 mask
-            vision_attention_mask,           # 图像 token 的 mask
-            attention_mask[:, 1:]            # 原始文本 token 的 mask
-        ], dim=1)
+        presents = [] 
+        for layer_idx, (layer, past_key_value) in enumerate(zip(self.model.layers, past_key_values)): 
+            hidden_states, present = layer( 
+                hidden_states, 
+                position_embeddings, 
+                past_key_value=past_key_value, 
+                use_cache=use_cache, 
+                attention_mask=attention_mask 
+            ) 
+            presents.append(present) 
 
-        position_embeddings = (
-            self.model.freqs_cos[start_pos:start_pos + seq_length],
-            self.model.freqs_sin[start_pos:start_pos + seq_length]
-        )
+        hidden_states = self.model.norm(hidden_states) 
+        logits = self.lm_head(hidden_states) # [bs, seq_len, vocab_size] 
 
-        presents = []
-        for layer_idx, (layer, past_key_value) in enumerate(zip(self.model.layers, past_key_values)):
-            hidden_states, present = layer(
-                hidden_states,
-                position_embeddings,
-                past_key_value=past_key_value,
-                use_cache=use_cache,
-                attention_mask=attention_mask
+        # --- 损失计算 (仅在预填充/训练阶段进行) ---
+        if start_pos == 0:
+            batch_size, seq_length_text = input_ids.shape
+            
+            # 准备文本部分的标签，忽略 pad_token
+            text_labels = input_ids[:, 1:].clone()
+            text_attention = attention_mask[:, 1 + vision_tensors.shape[1]:]
+            text_labels[text_attention == 0] = IGNORE_INDEX
+
+            # 构建完整的标签序列 (text + action)
+            full_labels1 = torch.cat([ 
+                torch.full((batch_size, 1 + vision_tensors.shape[1]), IGNORE_INDEX,  
+                        dtype=input_ids.dtype, device=input_ids.device),  # 忽略 <BOS> 和 Vision tokens
+                text_labels,
+            ], dim=1) 
+
+            # 创建只包含 action 的标签序列
+            action_only_labels = text_labels.clone() 
+            action_mask = torch.zeros_like(action_only_labels, dtype=torch.bool) 
+            action_token_ids = set(self.action_tokenizer.action_to_token_id.values()) 
+            for token_id in action_token_ids: 
+                action_mask |= (action_only_labels == token_id) 
+            
+            action_only_labels[~action_mask] = IGNORE_INDEX 
+            
+            full_labels2 = torch.cat([ 
+                torch.full((batch_size, 1 + vision_tensors.shape[1]), IGNORE_INDEX,
+                        dtype=input_ids.dtype, device=input_ids.device), # 忽略 <BOS> 和 Vision tokens
+                action_only_labels,
+            ], dim=1) 
+
+            # 根据 use_text_token 选择使用哪个标签序列
+            full_labels = full_labels1 if use_text_token else full_labels2
+
+            shift_logits = logits[:, :-1, :].contiguous()   # 预测：位置 0 到 n-1 
+            shift_labels = full_labels[:, 1:].contiguous()  # 目标：位置 1 到 n
+            
+            loss_fct = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX) 
+            loss = loss_fct( 
+                shift_logits.view(-1, self.config.vocab_size), 
+                shift_labels.view(-1) 
             )
-            presents.append(present)
-
-        hidden_states = self.model.norm(hidden_states)
-        logits = self.lm_head(hidden_states) # [bs, seq_len, vocab_size]
-
-        # 构建完整的标签序列，包含text tokens和action tokens
-        full_labels1 = torch.cat([
-            torch.full((batch_size, 1), IGNORE_INDEX, 
-                    dtype=input_ids.dtype, device=input_ids.device),        # <BOS> token (忽略)
-            torch.full((batch_size, num * 196), IGNORE_INDEX, 
-                    dtype=input_ids.dtype, device=input_ids.device),        # Vision tokens (忽略)
-            text_labels,                                         # Text tokens and action tokens (参与loss)
-        ], dim=1)
-
-        # 创建action token mask
-        action_only_labels = text_labels.clone()
-        action_mask = torch.zeros_like(action_only_labels, dtype=torch.bool)
-        action_token_ids = set(self.action_tokenizer.action_to_token_id.values())
-        for token_id in action_token_ids:
-            action_mask |= (action_only_labels == token_id)
         
-        # 将非action tokens设为IGNORE_INDEX
-        action_only_labels[~action_mask] = IGNORE_INDEX
-        
-        full_labels2 = torch.cat([
-            torch.full((batch_size, 1), IGNORE_INDEX, 
-                    dtype=input_ids.dtype, device=input_ids.device),        # <BOS> token (忽略)
-            torch.full((batch_size, num * 196), IGNORE_INDEX, 
-                    dtype=input_ids.dtype, device=input_ids.device),        # Vision tokens (忽略)
-            action_only_labels,                                  # 只有 Action tokens 参与loss，Text tokens被忽略
-        ], dim=1)
-
-        # 实现时间错位
-        full_labels = None
-        if use_text_token: full_labels = full_labels1
-        else: full_labels = full_labels2
-
-        shift_logits = logits[:, :-1, :].contiguous()    # 预测：位置 0 到 n-1
-        shift_labels = full_labels[:, 1:].contiguous()   # 目标：位置 1 到 n
-        
-        loss_fct = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
-        loss = loss_fct(
-            shift_logits.view(-1, self.config.vocab_size),
-            shift_labels.view(-1)
-        )
-        self.OUT.__setitem__('loss', loss)
-        self.OUT.__setitem__('hidden_states', hidden_states)
-        self.OUT.__setitem__('logits', logits)
-        self.OUT.__setitem__('past_key_values', presents)
+        # --- 返回结果 ---
+        self.OUT['loss'] = loss
+        self.OUT['hidden_states'] = hidden_states 
+        self.OUT['logits'] = logits 
+        # 只有当 use_cache 为 True 时才返回更新后的 KV 缓存
+        self.OUT['past_key_values'] = presents if use_cache else None
         return self.OUT
 
 
     @torch.no_grad()
-    def predict_action(self, pixel_values: torch.FloatTensor, task_description: str):
+    def predict_action_kv_cache(self, pixel_values: torch.FloatTensor, task_description: str):
         """
         使用 VLA 模型【自回归地】预测一个完整的动作序列。
         此版本集成了所有修正：作为类方法、使用KV缓存、且只在有效动作空间内解码。
@@ -335,8 +352,68 @@ class MicroVLA(MiniMindVLM):
 
         # 3. 将所有生成的动作token ID拼接起来
         action_token_ids_tensor = torch.cat(generated_action_ids, dim=1)
+        actions_np = self.action_tokenizer.decode_token_ids_to_actions(
+            action_token_ids_tensor.cpu().numpy()
+        )
+        
+        return actions_np
+    
+    @torch.no_grad()
+    def predict_action(self, pixel_values: torch.FloatTensor, task_description: str):
+        """
+        使用 VLA 模型【自回归地】预测一个完整的动作序列。
+        【注意】此版本不使用 KV 缓存，效率较低，主要用于调试或对比。
+        在每一步生成中，都需要将完整的序列重新传入模型进行前向计算。
+        """
+        self.eval() # 切换到评估模式
+        device = self.device
+        batch_size = pixel_values.shape[0]
+        action_dims = self.action_tokenizer.action_dims
 
-        # 4. 一次性将token ID解码为连续动作
+        # 1. 准备初始的文本输入: <bos> + instruction
+        # `generated_ids` 将在循环中保存所有已生成的 token
+        instruction_ids = self.action_tokenizer.tokenizer.encode(
+            task_description, add_special_tokens=False, return_tensors='pt'
+        ).to(device)
+        
+        bos_id = self.action_tokenizer.bos_token_id
+        bos_tensor = torch.full((batch_size, 1), bos_id, dtype=torch.long, device=device)
+
+        # generated_ids 将在循环中不断增长
+        generated_ids = torch.cat([bos_tensor, instruction_ids.repeat(batch_size, 1)], dim=1)
+
+        # 2. 预先获取有效的动作 token ID 列表，用于约束解码
+        action_token_ids_list = list(self.action_tokenizer.action_to_token_id.values())
+        action_token_ids_tensor = torch.tensor(action_token_ids_list, device=device)
+
+        # 3. 自回归生成 N 个动作 token
+        for _ in range(action_dims):
+            attention_mask = torch.ones_like(generated_ids)
+            outputs = self.forward(
+                pixel_values=pixel_values,
+                input_ids=generated_ids,
+                attention_mask=attention_mask,
+                use_cache=False, # 明确禁用 KV 缓存
+                past_key_values=None
+            )
+
+            # c. 获取序列最后一个 token 的 logits，用于预测下一个 token
+            next_token_logits = outputs['logits'][:, -1, :]
+
+            # d. 约束解码：只在有效动作空间内选择
+            action_logits = torch.index_select(next_token_logits, dim=1, index=action_token_ids_tensor)
+            best_action_index = torch.argmax(action_logits, dim=-1)
+            predicted_token_id = action_token_ids_tensor[best_action_index]
+            
+            # e. 将新生成的 token 拼接到序列末尾，为下一次迭代做准备
+            generated_ids = torch.cat([
+                generated_ids, 
+                predicted_token_id.unsqueeze(1)
+            ], dim=1)
+
+        # 4. 提取出动作部分的 token ID
+        action_token_ids_tensor = generated_ids[:, -action_dims:]
+        # 5. 将 token ID 解码为实际的动作值
         actions_np = self.action_tokenizer.decode_token_ids_to_actions(
             action_token_ids_tensor.cpu().numpy()
         )

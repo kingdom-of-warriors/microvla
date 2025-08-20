@@ -59,8 +59,8 @@ def init_trained_vlm(config: VLACofig, action_1st: List[float], action_99th: Lis
     return model, action_tokenizer
 
 # 其他函数 (split_dataset, collate_fn, compute_action_metrics) 保持不变
-def split_dataset(dataset: LiberoDataset, train_ratio=0.8, val_ratio=0.2):
-    print("Splitting dataset by episode...")
+def split_dataset(dataset: LiberoDataset, train_ratio=0.8, rank=0):
+    if rank == 0: print("Splitting dataset by episode...")
     unique_episodes = np.unique(dataset['episode_index'])
     train_episodes, val_episodes = train_test_split(unique_episodes, train_size=train_ratio, random_state=42)
     train_episodes, val_episodes = set(train_episodes), set(val_episodes)
@@ -68,7 +68,7 @@ def split_dataset(dataset: LiberoDataset, train_ratio=0.8, val_ratio=0.2):
     val_indices = [i for i, ep_idx in enumerate(dataset['episode_index']) if ep_idx in val_episodes]
     train_dataset = dataset.select(train_indices)
     val_dataset = dataset.select(val_indices)
-    print(f"Split complete. Train: {len(train_dataset)}, Val: {len(val_dataset)}")
+    if rank == 0: print(f"Split complete. Train: {len(train_dataset)}, Val: {len(val_dataset)}")
     return train_dataset, val_dataset
 
 def collate_fn(batch, action_tokenizer: ActionTokenizer, max_length: int = 256):
@@ -94,10 +94,13 @@ def collate_fn(batch, action_tokenizer: ActionTokenizer, max_length: int = 256):
 def compute_action_metrics(outputs, batch, action_tokenizer: ActionTokenizer, num_vision_patches=196):
     action_preds = outputs['logits'][:, 2 * num_vision_patches + 1:, ].argmax(dim=2)
     action_gt = batch['input_ids'][:, 1:].to(action_preds.device)
+    print("pred", action_preds[0], '\n')
+    print("gt", action_gt[0], '\n')
     action_token_ids = set(action_tokenizer.action_to_token_id.values())
     mask = torch.zeros_like(action_gt, dtype=torch.bool)
     for token_id in action_token_ids:
         mask |= (action_gt == token_id)
+    print("mask", mask[0], '\n')
     if mask.sum() == 0: return None
     correct_preds = (action_preds == action_gt) & mask
     return correct_preds.sum().float() / mask.sum().float()
@@ -117,30 +120,25 @@ def train_vla():
     
     # --- 2. 准备数据集 ---
     if rank == 0: print("Loading and splitting dataset...")
-    # [DDP 修改] 确保所有进程都加载和划分数据集，避免进程不同步
     dataset = load_dataset("physical-intelligence/libero")['train']
-    train_ds, val_ds = split_dataset(dataset)
+    train_ds, val_ds = split_dataset(dataset, 0.8, rank)
 
-    train_dataset = LiberoDataset(ds=train_ds, task_file_path='dataset/meta/tasks_zh.jsonl', stats_path='dataset/meta/stats.json')
-    val_dataset = LiberoDataset(ds=val_ds, task_file_path='dataset/meta/tasks_zh.jsonl', stats_path='dataset/meta/stats.json')
+    train_dataset = LiberoDataset(ds=train_ds, task_file_path='dataset/meta/tasks.jsonl', stats_path='dataset/meta/stats.json')
+    val_dataset = LiberoDataset(ds=val_ds, task_file_path='dataset/meta/tasks.jsonl', stats_path='dataset/meta/stats.json')
     action_1st, action_99th = train_dataset.stats['actions']['1st'], train_dataset.stats['actions']['99th']
 
     # [DDP 修改] 使用 DistributedSampler
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
-
-    # [DDP 修改] DataLoader 使用 sampler，且 shuffle=False
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=lambda b: collate_fn(b, action_tokenizer), num_workers=4, sampler=train_sampler)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=lambda b: collate_fn(b, action_tokenizer), num_workers=4, sampler=val_sampler)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=lambda b: collate_fn(b, action_tokenizer), num_workers=0, sampler=train_sampler)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=lambda b: collate_fn(b, action_tokenizer), num_workers=0, sampler=val_sampler)
 
     # --- 3. 初始化并封装模型 ---
     model, action_tokenizer = init_trained_vlm(config=config, action_1st=action_1st, action_99th=action_99th, rank=rank)
     model = model.to(device)
-    # [DDP 修改] 使用DDP封装模型
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     
     if rank == 0:
-        # 参数统计保持不变...
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"Trainable params per GPU: {trainable_params / 1e6:.3f}M")
     
@@ -165,8 +163,6 @@ def train_vla():
             pixel_values = batch['pixel_values'].to(device)
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
-            
-            # model(...) 调用的是 DDP 封装后的模型
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, pixel_values=pixel_values, use_text_token=False)
             
             # loss.backward() 内部会自动进行梯度同步
@@ -219,8 +215,7 @@ def train_vla():
             print(f"  Avg Action Accuracy: {avg_val_acc:.4f}")
             print("-" * 50)
 
-            # [DDP 修改] 只在主进程保存模型，并保存 .module 的 state_dict
-            checkpoint_path = f"vla_zh_checkpoint_epoch_{epoch+1}.pth"
+            checkpoint_path = f"vla_checkpoint_epoch_{epoch+1}.pth"
             torch.save(model.module.state_dict(), checkpoint_path)
             print(f"Checkpoint saved to {checkpoint_path}")
 

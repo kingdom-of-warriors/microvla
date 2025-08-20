@@ -42,7 +42,7 @@ def init_trained_vlm(config: VLACofig, action_1st: List[float], action_99th: Lis
 
     print("VLM weights loaded successfully.")
     print("Model initialized.")
-    return model, action_tokenizer
+    return model
 
 def split_dataset(dataset: LiberoDataset, train_ratio=0.8, val_ratio=0.2):
     """
@@ -153,10 +153,10 @@ def train_vla():
     train_ds, val_ds = split_dataset(dataset)
 
     train_dataset = LiberoDataset(ds=train_ds, 
-                                  task_file_path='dataset/meta/tasks_zh.jsonl',
+                                  task_file_path='dataset/meta/tasks.jsonl',
                                   stats_path='dataset/meta/stats.json')
     val_dataset = LiberoDataset(ds=val_ds, 
-                                task_file_path='dataset/meta/tasks_zh.jsonl',
+                                task_file_path='dataset/meta/tasks.jsonl',
                                 stats_path='dataset/meta/stats.json')
     # 1和99分位数
     action_1st  = train_dataset.stats['actions']['1st']
@@ -178,7 +178,8 @@ def train_vla():
     )
 
     # --- 3. 初始化模型和分词器 ---
-    model, action_tokenizer = init_trained_vlm(config=config, action_1st=action_1st, action_99th=action_99th)
+    model = init_trained_vlm(config=config, action_1st=action_1st, action_99th=action_99th)
+    action_tokenizer = model.action_tokenizer
     model = model.to(device)
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
@@ -287,7 +288,7 @@ def train_vla():
         print("-" * 50)
 
         # 保存模型检查点
-        torch.save(model.state_dict(), f"vla_zh_checkpoint_epoch_{epoch+1}.pth")
+        torch.save(model.state_dict(), f"vla_checkpoint_epoch_{epoch+1}.pth")
 
 if __name__ == "__main__":
     train_vla()
