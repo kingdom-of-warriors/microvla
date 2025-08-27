@@ -11,3 +11,6 @@ LIBERO/
 .vscode/
 eval_results/
 eval_videos/
+
+# w & b
+wandb/

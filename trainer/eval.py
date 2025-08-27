@@ -31,8 +31,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="VLA Model Evaluation Script")
     parser.add_argument("--checkpoint_path", type=str, required=True, help="Path to the trained VLA model checkpoint")
     parser.add_argument("--model_config_path", type=str, default="./model", help="Path to the model configuration")
-    parser.add_argument("--benchmark", type=str, default="libero_10", choices=["libero_10", "libero_spatial", "libero_object", "libero_goal"], help="LIBERO benchmark to evaluate on")
-    parser.add_argument("--task_id", type=int, default=0, help="Specific task ID to evaluate (0-9)")
+    parser.add_argument("--benchmark", type=str, default="libero_object", choices=["libero_10", "libero_spatial", "libero_object", "libero_goal"], help="LIBERO benchmark to evaluate on")
+    parser.add_argument("--task_id", type=int, default=2, help="Specific task ID to evaluate (0-9)")
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to run evaluation on")
     parser.add_argument("--num_episodes", type=int, default=1, help="Number of episodes to evaluate")
     parser.add_argument("--max_steps", type=int, default=300, help="Maximum steps per episode")
@@ -85,6 +85,7 @@ def raw_obs_to_tensor_obs(obs, device):
     # 定义与训练时相同的变换
     stats = load_stats('dataset/meta/stats.json')
     main_tfs = transforms.Compose([
+        transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=stats['image']['mean'],      # [0.485, 0.456, 0.406]
@@ -93,6 +94,7 @@ def raw_obs_to_tensor_obs(obs, device):
     ])
     
     wrist_tfs = transforms.Compose([
+        transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=stats['wrist_image']['mean'], # [0.512, 0.398, 0.321]
@@ -120,8 +122,8 @@ def evaluate_task(model: MicroVLA, task, args):
     
     env_args = {
         "bddl_file_name": os.path.join(get_libero_path("bddl_files"), task.problem_folder, task.bddl_file),
-        "camera_heights": 224,
-        "camera_widths": 224,
+        "camera_heights": 256,
+        "camera_widths": 256,
     }
     
     env = OffScreenRenderEnv(**env_args)
@@ -154,11 +156,11 @@ def evaluate_task(model: MicroVLA, task, args):
 
             for step in range(args.max_steps):
                 pixel_values = raw_obs_to_tensor_obs(obs, args.device)
-                # actions_batch1 = model.predict_action_kv_cache(pixel_values, task.language)
-                actions_batch2 = model.predict_action(pixel_values, task.language)
-                # action1 = actions_batch1[0]
-                action2 = actions_batch2[0]
-                action = action2
+                actions_batch1 = model.predict_action_kv_cache(pixel_values, task.language)
+                # actions_batch2 = model.predict_action(pixel_values, task.language)
+                action1 = actions_batch1[0]
+                # action2 = actions_batch2[0]
+                action = action1
                 print(action)
                 obs, reward, done, info = env.step(action)
                 total_steps += 1

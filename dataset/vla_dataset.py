@@ -39,7 +39,6 @@ class LiberoDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.dataset[idx]
         
-        import ipdb; ipdb.set_trace()
         image = self.main_tfs(sample['image'])
         wrist_image = self.wrist_tfs(sample['wrist_image'])
         state = torch.tensor(sample['state'], dtype=torch.float32)

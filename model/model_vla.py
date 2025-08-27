@@ -180,13 +180,9 @@ class MicroVLA(MiniMindVLM):
         # --- KV Cache 设置 ---
         past_key_values = past_key_values or [None] * len(self.model.layers)
         start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
-        
         loss = None
         # 这是实现 KV 缓存的核心。根据 start_pos 判断是预填充还是解码步骤。
         if start_pos == 0:
-            # === 预填充 / 训练阶段 ===
-            # 在此阶段，处理所有输入（图像+文本）并构建初始的 KV 缓存。
-            # 1. 获取文本嵌入
             hidden_states = self.model.dropout(self.model.embed_tokens(input_ids)) # [bs, seq_len, hidden_size] 
 
             # 2. 获取图像嵌入
@@ -296,7 +292,8 @@ class MicroVLA(MiniMindVLM):
         self.OUT['logits'] = logits 
         # 只有当 use_cache 为 True 时才返回更新后的 KV 缓存
         self.OUT['past_key_values'] = presents if use_cache else None
-        return self.OUT
+        labels = shift_labels if not use_cache else None
+        return self.OUT, labels
 
 
     @torch.no_grad()
@@ -329,7 +326,7 @@ class MicroVLA(MiniMindVLM):
         # 2. 自回归生成N个动作token
         for _ in range(action_dims):
             attention_mask = torch.ones_like(input_ids)
-            outputs = self(
+            outputs, _ = self(
                 pixel_values=pixel_values,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -371,7 +368,6 @@ class MicroVLA(MiniMindVLM):
         action_dims = self.action_tokenizer.action_dims
 
         # 1. 准备初始的文本输入: <bos> + instruction
-        # `generated_ids` 将在循环中保存所有已生成的 token
         instruction_ids = self.action_tokenizer.tokenizer.encode(
             task_description, add_special_tokens=False, return_tensors='pt'
         ).to(device)
@@ -389,7 +385,7 @@ class MicroVLA(MiniMindVLM):
         # 3. 自回归生成 N 个动作 token
         for _ in range(action_dims):
             attention_mask = torch.ones_like(generated_ids)
-            outputs = self.forward(
+            outputs, _ = self.forward(
                 pixel_values=pixel_values,
                 input_ids=generated_ids,
                 attention_mask=attention_mask,
@@ -413,6 +409,7 @@ class MicroVLA(MiniMindVLM):
 
         # 4. 提取出动作部分的 token ID
         action_token_ids_tensor = generated_ids[:, -action_dims:]
+        print(action_token_ids_tensor)
         # 5. 将 token ID 解码为实际的动作值
         actions_np = self.action_tokenizer.decode_token_ids_to_actions(
             action_token_ids_tensor.cpu().numpy()
