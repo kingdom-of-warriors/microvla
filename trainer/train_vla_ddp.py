@@ -106,15 +106,6 @@ def compute_action_metrics(outputs, batch, action_tokenizer: ActionTokenizer, nu
     correct_preds = (action_preds == action_gt) & mask
     return correct_preds.sum().float() / mask.sum().float()
 
-def detect_loss(outputs, shift_labels, action_tokenizer: ActionTokenizer, rank):
-    predicted_tokens = outputs["logits"].argmax(dim=-1)[:, :-1]  # [bs, length-1]
-    # 找到有效标签的位置（非-100的位置就是动作位置）
-    valid_mask = (shift_labels != IGNORE_INDEX)  # [bs, length]
-    action_predictions = predicted_tokens[valid_mask]  # [num_action_tokens]
-    action_token_ids = set(action_tokenizer.action_to_token_id.values())
-    valid_action_count = sum(token.item() in action_token_ids for token in action_predictions)
-    
-    # if rank == 0: print(f"预测了 {len(action_predictions)} 个动作token，其中 {valid_action_count} 个是有效动作token")
 
 def train_vla():
     args = parse_args()
@@ -189,8 +180,7 @@ def train_vla():
             pixel_values = batch['pixel_values'].to(device)
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
-            outputs, shift_labels = model(input_ids=input_ids, attention_mask=attention_mask, pixel_values=pixel_values, use_text_token=False)
-            # detect_loss(outputs, shift_labels, action_tokenizer, rank)
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, pixel_values=pixel_values, use_text_token=False)
             loss = outputs.loss
             loss.backward()
             optimizer.step()
@@ -225,7 +215,7 @@ def train_vla():
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
                 
-                outputs, _ = model(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask)
+                outputs = model(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask)
                 
                 val_loss_sum += outputs['loss'].item()
                 

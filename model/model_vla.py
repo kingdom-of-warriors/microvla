@@ -5,13 +5,13 @@ import warnings
 from .model_vlm import *
 from typing import Optional, Tuple, List
 from torch import nn
-from typing import List
 
 warnings.filterwarnings('ignore')
 
 import json
 import numpy as np
 from transformers import PreTrainedTokenizerBase
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from typing import List, Union
 IGNORE_INDEX = -100
 
@@ -84,10 +84,11 @@ class ActionTokenizer:
         将token IDs解码为动作值
         """
         action_token_ids = np.array(action_token_ids)
-        if len(action_token_ids.shape) == 1: # 单个动作: [action_dims]
+        if len(action_token_ids.shape) == 1:                      # 单个动作: [action_dims]
             action_token_ids = action_token_ids.reshape(1, -1)
             is_single = True
-        else: is_single = False # 批量动作: [batch_size, action_dims]
+        else: 
+            is_single = False                                   # 批量动作: [batch_size, action_dims]
         
         batch_size, action_dims = action_token_ids.shape
         actions = np.zeros_like(action_token_ids, dtype=float)
@@ -175,19 +176,17 @@ class MicroVLA(MiniMindVLM):
                 use_cache: bool = False, 
                 pixel_values: Optional[torch.FloatTensor] = None, # [bs, num, c, im_h, im_w] 
                 use_text_token: bool = False, 
-                **args): 
-        
-        # --- KV Cache 设置 ---
+                **args) -> CausalLMOutputWithPast:
+
         past_key_values = past_key_values or [None] * len(self.model.layers)
         start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
         loss = None
-        # 这是实现 KV 缓存的核心。根据 start_pos 判断是预填充还是解码步骤。
+        # KV 缓存核心：start_pos 判断是预填充还是解码步骤。
         if start_pos == 0:
-            hidden_states = self.model.dropout(self.model.embed_tokens(input_ids)) # [bs, seq_len, hidden_size] 
-
+            # 1. 隐藏层初始化 
+            hidden_states = self.model.dropout(self.model.embed_tokens(input_ids)) # [bs, seq_len, hidden_size]      
             # 2. 获取图像嵌入
-            if len(pixel_values.shape) == 6: 
-                pixel_values = pixel_values.squeeze(2) 
+            if len(pixel_values.shape) == 6: pixel_values = pixel_values.squeeze(2) 
             bs, num, c, im_h, im_w = pixel_values.shape 
             vision_features_list = [] 
             for i in range(num): 
@@ -204,9 +203,8 @@ class MicroVLA(MiniMindVLM):
             ], dim=1)
             
             # 4. 创建对应的拼接后 attention_mask
-            batch_size = hidden_states.shape[0]
             vision_attention_mask = torch.ones( 
-                (batch_size, vision_tensors.shape[1]),  
+                (bs, vision_tensors.shape[1]),  
                 dtype=attention_mask.dtype,  
                 device=attention_mask.device 
             ) 
@@ -216,13 +214,10 @@ class MicroVLA(MiniMindVLM):
                 attention_mask[:, 1:]            # 原始文本 token 的 mask 
             ], dim=1)
             
+        # 利用已有的 KV 缓存，只需处理新的 token(s)，`attention_mask` 应该由外部的生成循环更新并传入
         else:
-            # === 解码阶段 ===
-            # 利用已有的 KV 缓存，只需处理新的 token(s)
-            # `input_ids` 此时通常形状为 [bs, 1]
             hidden_states = self.model.dropout(self.model.embed_tokens(input_ids))
-            # `attention_mask` 应该由外部的生成循环更新并传入
-        
+            
         seq_length = hidden_states.shape[1]
         position_embeddings = ( 
             self.model.freqs_cos[start_pos : start_pos + seq_length], 
@@ -243,72 +238,73 @@ class MicroVLA(MiniMindVLM):
         hidden_states = self.model.norm(hidden_states) 
         logits = self.lm_head(hidden_states) # [bs, seq_len, vocab_size] 
 
-        # --- 损失计算 (仅在预填充/训练阶段进行) ---
+        # Loss计算
         if start_pos == 0:
-            batch_size, seq_length_text = input_ids.shape
+            bs, _ = input_ids.shape
             
-            # 准备文本部分的标签，忽略 pad_token
+            # label类型1：创建只包含 text + action 的标签序列
             text_labels = input_ids[:, 1:].clone()
             text_attention = attention_mask[:, 1 + vision_tensors.shape[1]:]
             text_labels[text_attention == 0] = IGNORE_INDEX
-
-            # 构建完整的标签序列 (text + action)
+            # 忽略 <BOS> 和 Vision tokens
             full_labels1 = torch.cat([ 
-                torch.full((batch_size, 1 + vision_tensors.shape[1]), IGNORE_INDEX,  
-                        dtype=input_ids.dtype, device=input_ids.device),  # 忽略 <BOS> 和 Vision tokens
+                torch.full((bs, 1 + vision_tensors.shape[1]), 
+                           IGNORE_INDEX, 
+                           dtype=input_ids.dtype, 
+                           device=input_ids.device),
                 text_labels,
             ], dim=1) 
 
-            # 创建只包含 action 的标签序列
+            # label类型2：创建只包含 action 的标签序列
+            # a. 忽略 text token
             action_only_labels = text_labels.clone() 
             action_mask = torch.zeros_like(action_only_labels, dtype=torch.bool) 
             action_token_ids = set(self.action_tokenizer.action_to_token_id.values()) 
-            for token_id in action_token_ids: 
-                action_mask |= (action_only_labels == token_id) 
-            
+            for token_id in action_token_ids: action_mask |= (action_only_labels == token_id) 
             action_only_labels[~action_mask] = IGNORE_INDEX 
             
+            # b. 忽略 <BOS> 和 Vision tokens
             full_labels2 = torch.cat([ 
-                torch.full((batch_size, 1 + vision_tensors.shape[1]), IGNORE_INDEX,
-                        dtype=input_ids.dtype, device=input_ids.device), # 忽略 <BOS> 和 Vision tokens
+                torch.full((bs, 1 + vision_tensors.shape[1]), 
+                           IGNORE_INDEX, 
+                           dtype=input_ids.dtype, 
+                           device=input_ids.device),
                 action_only_labels,
             ], dim=1) 
 
-            # 根据 use_text_token 选择使用哪个标签序列
-            full_labels = full_labels1 if use_text_token else full_labels2
+            
+            full_labels = full_labels1 if use_text_token else full_labels2 # 根据 use_text_token 选择用哪个标签计算Loss
 
             shift_logits = logits[:, :-1, :].contiguous()   # 预测：位置 0 到 n-1 
             shift_labels = full_labels[:, 1:].contiguous()  # 目标：位置 1 到 n
-            
             loss_fct = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX) 
             loss = loss_fct( 
                 shift_logits.view(-1, self.config.vocab_size), 
                 shift_labels.view(-1) 
             )
         
-        # --- 返回结果 ---
         self.OUT['loss'] = loss
         self.OUT['hidden_states'] = hidden_states 
         self.OUT['logits'] = logits 
         # 只有当 use_cache 为 True 时才返回更新后的 KV 缓存
         self.OUT['past_key_values'] = presents if use_cache else None
-        labels = shift_labels if not use_cache else None
-        return self.OUT, labels
-
+        return self.OUT
 
     @torch.no_grad()
     def predict_action_kv_cache(self, pixel_values: torch.FloatTensor, task_description: str):
         """
         使用 VLA 模型【自回归地】预测一个完整的动作序列。
-        此版本集成了所有修正：作为类方法、使用KV缓存、且只在有效动作空间内解码。
         """
+        self.eval()
         device = self.device 
         batch_size = pixel_values.shape[0]
         action_dims = self.action_tokenizer.action_dims
 
         # 1. 准备初始的文本输入: <bos> + instruction
         instruction_ids = self.action_tokenizer.tokenizer.encode(
-            task_description, add_special_tokens=False, return_tensors='pt'
+            task_description, 
+            add_special_tokens=False, 
+            return_tensors='pt'
         ).to(device)
         input_ids = instruction_ids.repeat(batch_size, 1)
 
@@ -326,7 +322,7 @@ class MicroVLA(MiniMindVLM):
         # 2. 自回归生成N个动作token
         for _ in range(action_dims):
             attention_mask = torch.ones_like(input_ids)
-            outputs, _ = self(
+            outputs = self.forward(
                 pixel_values=pixel_values,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -335,17 +331,13 @@ class MicroVLA(MiniMindVLM):
             )
 
             next_token_logits = outputs.logits[:, -1, :]
-
-            # 约束解码：只在有效动作空间内选择 ---
-            action_logits = torch.index_select(next_token_logits, dim=1, index=action_token_ids_tensor)
+            action_logits = torch.index_select(next_token_logits, dim=1, index=action_token_ids_tensor) # 约束解码：只在有效动作空间内选择
             best_action_index = torch.argmax(action_logits, dim=-1)
             predicted_token_id = action_token_ids_tensor[best_action_index]
-            
             generated_action_ids.append(predicted_token_id.unsqueeze(1))
             input_ids = predicted_token_id.unsqueeze(1)
             past_key_values = outputs.past_key_values
-            # 在第一次迭代后，不再需要传入图像，其信息已在past_key_values中
-            pixel_values = None 
+            pixel_values = None # 在第一次迭代后，不再需要传入图像，其信息已在past_key_values中
 
         # 3. 将所有生成的动作token ID拼接起来
         action_token_ids_tensor = torch.cat(generated_action_ids, dim=1)
@@ -360,9 +352,8 @@ class MicroVLA(MiniMindVLM):
         """
         使用 VLA 模型【自回归地】预测一个完整的动作序列。
         【注意】此版本不使用 KV 缓存，效率较低，主要用于调试或对比。
-        在每一步生成中，都需要将完整的序列重新传入模型进行前向计算。
         """
-        self.eval() # 切换到评估模式
+        self.eval()
         device = self.device
         batch_size = pixel_values.shape[0]
         action_dims = self.action_tokenizer.action_dims
@@ -374,8 +365,6 @@ class MicroVLA(MiniMindVLM):
         
         bos_id = self.action_tokenizer.bos_token_id
         bos_tensor = torch.full((batch_size, 1), bos_id, dtype=torch.long, device=device)
-
-        # generated_ids 将在循环中不断增长
         generated_ids = torch.cat([bos_tensor, instruction_ids.repeat(batch_size, 1)], dim=1)
 
         # 2. 预先获取有效的动作 token ID 列表，用于约束解码
@@ -385,18 +374,16 @@ class MicroVLA(MiniMindVLM):
         # 3. 自回归生成 N 个动作 token
         for _ in range(action_dims):
             attention_mask = torch.ones_like(generated_ids)
-            outputs, _ = self.forward(
+            outputs = self.forward(
                 pixel_values=pixel_values,
                 input_ids=generated_ids,
                 attention_mask=attention_mask,
-                use_cache=False, # 明确禁用 KV 缓存
+                use_cache=False,
                 past_key_values=None
             )
 
             # c. 获取序列最后一个 token 的 logits，用于预测下一个 token
             next_token_logits = outputs['logits'][:, -1, :]
-
-            # d. 约束解码：只在有效动作空间内选择
             action_logits = torch.index_select(next_token_logits, dim=1, index=action_token_ids_tensor)
             best_action_index = torch.argmax(action_logits, dim=-1)
             predicted_token_id = action_token_ids_tensor[best_action_index]
@@ -409,10 +396,7 @@ class MicroVLA(MiniMindVLM):
 
         # 4. 提取出动作部分的 token ID
         action_token_ids_tensor = generated_ids[:, -action_dims:]
-        print(action_token_ids_tensor)
         # 5. 将 token ID 解码为实际的动作值
-        actions_np = self.action_tokenizer.decode_token_ids_to_actions(
-            action_token_ids_tensor.cpu().numpy()
-        )
+        actions_np = self.action_tokenizer.decode_token_ids_to_actions(action_token_ids_tensor.cpu().numpy())
         
         return actions_np
