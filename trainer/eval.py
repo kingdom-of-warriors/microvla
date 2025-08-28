@@ -35,7 +35,7 @@ def parse_args():
     parser.add_argument("--task_id", type=int, default=2, help="Specific task ID to evaluate (0-9)")
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to run evaluation on")
     parser.add_argument("--num_episodes", type=int, default=1, help="Number of episodes to evaluate")
-    parser.add_argument("--max_steps", type=int, default=300, help="Maximum steps per episode")
+    parser.add_argument("--max_steps", type=int, default=350, help="Maximum steps per episode")
     parser.add_argument("--save_videos", action="store_true", help="Save evaluation videos")
     parser.add_argument("--video_dir", type=str, default="./eval_videos", help="Directory to save videos")
     parser.add_argument("--results_dir", type=str, default="./eval_results", help="Directory to save evaluation results")
@@ -140,7 +140,6 @@ def evaluate_task(model: MicroVLA, task, args):
     for episode in tqdm(range(args.num_episodes), desc=f"Task {args.task_id} Episodes"):
         episode_video_dir = os.path.join(video_base_dir, f"episode_{episode}")
         
-        # VideoWriter的第二个参数是布尔值 save_video
         with VideoWriter(episode_video_dir, args.save_videos) as video_writer:
             obs = env.reset()
             
@@ -161,8 +160,8 @@ def evaluate_task(model: MicroVLA, task, args):
                 action1 = actions_batch1[0]
                 # action2 = actions_batch2[0]
                 action = action1
-                print(action)
                 obs, reward, done, info = env.step(action)
+                print(step, done)
                 total_steps += 1
                 
                 if args.save_videos:

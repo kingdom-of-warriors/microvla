@@ -120,16 +120,22 @@ def train_vla():
     args = parse_args()
     rank, local_rank, world_size = setup_ddp()
     device = torch.device(f"cuda:{local_rank}")
-    # [WANDB 添加] 只在主进程初始化wandb
+    config = VLACofig(hidden_size=768, num_hidden_layers=16, max_seq_len=8192, bins=256)
+    config.map_path = 'model/action_token_map_256_new.json'
+
+    epochs = 20
+    batch_size = 8
+    learning_rate = 1e-5
+    
     if rank == 0 and args.use_wandb:
         wandb.init(
             project="microvla_debug",
-            name=f"vla_training_ddp_ws{world_size}",
+            name=f"vla_training_ddp_ws{world_size}_20250827",
             config={
-                "epochs": 5,
-                "batch_size_per_gpu": 8,
-                "total_batch_size": 8 * world_size,
-                "learning_rate": 1e-5,
+                "epochs": epochs,
+                "batch_size_per_gpu": batch_size,
+                "total_batch_size": batch_size * world_size,
+                "learning_rate": learning_rate,
                 "world_size": world_size,
                 "hidden_size": 768,
                 "num_hidden_layers": 16,
@@ -139,17 +145,10 @@ def train_vla():
         )
     elif rank == 0: print('wandb disabled by --use_wandb flag')
 
-    config = VLACofig(hidden_size=768, num_hidden_layers=16, max_seq_len=8192, bins=256)
-    config.map_path = 'model/action_token_map_256_new.json'
-
-    epochs = 5
-    batch_size = 8
-    learning_rate = 1e-5
-    
     # --- 2. 准备数据集 ---
     if rank == 0: print("Loading and splitting dataset...")
     dataset = load_dataset("physical-intelligence/libero")['train']
-    train_ds, val_ds = split_dataset(dataset, 0.8, rank)
+    train_ds, val_ds = split_dataset(dataset, 0.9, rank)
 
     train_dataset = LiberoDataset(ds=train_ds, task_file_path='dataset/meta/tasks.jsonl', stats_path='dataset/meta/stats.json')
     val_dataset = LiberoDataset(ds=val_ds, task_file_path='dataset/meta/tasks.jsonl', stats_path='dataset/meta/stats.json')
@@ -226,7 +225,7 @@ def train_vla():
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
                 
-                outputs = model(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask)
+                outputs, _ = model(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask)
                 
                 val_loss_sum += outputs['loss'].item()
                 
@@ -266,7 +265,7 @@ def train_vla():
             print(f"  Avg Val Action Accuracy: {avg_val_acc:.4f}")
             print("-" * 50)
 
-            checkpoint_path = f"vla_checkpoint_epoch_{epoch+1}.pth"
+            checkpoint_path = f"ckpt/en_epoch_{epoch+1}.pth"
             torch.save(model.module.state_dict(), checkpoint_path)
             print(f"Checkpoint saved to {checkpoint_path}")
 
