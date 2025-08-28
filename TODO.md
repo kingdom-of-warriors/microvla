@@ -1,59 +1,105 @@
-# TODO: 基于 Meta 信息优化数据集加载
+# MicroVLA 项目 TODO 列表
 
-## 1. 图像数据优化
+## 🔧 1. 代码重构 (Code Refactoring)
 
-### 1.1 使用数据集特定的归一化参数
-- [X] 从 `dataset/meta/stats.json` 读取图像统计信息
-- [X] 替换 ImageNet 标准参数，使用数据集实际的 mean/std
-- [X] 为主图像和手腕图像分别应用不同的归一化参数
+### 1.1 模型代码优化
+- [ ] **重构训练代码结构**
+  - [ ] 完善 `train_vla_ddp.py` 中的未完成函数
+  - [ ] 优化 `collate_fn` 函数的实现
+  - [ ] 统一错误处理和日志记录
 
-```python
-# 当前使用 ImageNet 参数
-transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+- [ ] **代码规范化**
+  - [ ] 添加类型注释 (Type Hints)
+  - [ ] 统一命名规范
+  - [ ] 添加详细的文档字符串 (Docstrings)
+  - [ ] 移除冗余代码和注释
 
-# 改进：使用数据集特定参数
-image_mean = [stats['image']['mean'][i] for i in range(3)]
-image_std = [stats['image']['std'][i] for i in range(3)]
-wrist_mean = [stats['wrist_image']['mean'][i] for i in range(3)]
-wrist_std = [stats['wrist_image']['std'][i] for i in range(3)]
-```
+### 1.2 配置管理优化
+- [ ] **创建统一的配置文件**
+  - [ ] 将硬编码参数提取到配置文件
+  - [ ] 支持命令行参数覆盖
+  - [ ] 添加配置验证逻辑
 
-### 1.2 分别处理不同类型图像
-- [X] 为主视角图像和手腕图像创建不同的 transform pipeline
-- [X] 考虑两种图像可能有不同的光照、角度特性
-- [X] 在 LiberoDataset 中支持多种 transform
+- [ ] **路径管理优化**
+  - [ ] 统一模型路径管理
+  - [ ] 支持相对路径和绝对路径
+  - [ ] 添加路径存在性检查
 
-## 2. 动作数据优化
+## 📊 2. 评估模块完善 (Evaluation Module)
 
-### 2.1 处理极端动作值
-- [X] 分析动作数据的分布特征（min/max/percentiles）
-- [X] 使用 99 百分位数作为剪裁边界，避免极端异常值影响
-- [X] 实现动作数据的健壮预处理
+### 2.1 评估框架构建
+- [ ] **创建独立的评估脚本**
+  - [ ] `evaluate.py` - 主评估脚本
+  - [ ] `metrics.py` - 评估指标计算
+  - [ ] `visualize.py` - 结果可视化
 
-```python
-# 使用 99 百分位数替代绝对 min/max
-action_min_99 = np.percentile(actions, 1)   # 1% 百分位
-action_max_99 = np.percentile(actions, 99)  # 99% 百分位
-actions_clipped = np.clip(actions, action_min_99, action_max_99)
-```
+- [ ] **数据集适配**
+  - [ ] 支持 LIBERO 数据集评估
+  - [ ] 添加自定义数据集支持
+  - [ ] 实现数据加载和预处理
 
-## 3. 实现仅对 action token 的loss计算
-- [X] 实现仅对 action token 的loss计算
-```python
-action_only_labels = text_labels.clone()
-action_mask = torch.zeros_like(action_only_labels, dtype=torch.bool)
-action_token_ids = set(action_tokenizer.action_to_token_id.values())
-for token_id in action_token_ids:
-    action_mask |= (action_only_labels == token_id)
+### 2.3 可视化和报告
+- [ ] **结果可视化**
+  - [ ] 生成训练曲线图
+  - [ ] 绘制混淆矩阵
+  - [ ] 创建动作预测对比图
 
-# 将非action tokens设为IGNORE_INDEX
-action_only_labels[~action_mask] = IGNORE_INDEX
+- [ ] **评估报告生成**
+  - [ ] 自动生成评估报告
+  - [ ] 导出结果到 CSV/JSON
+  - [ ] 集成到 WandB 可视化
 
-full_labels2 = torch.cat([
-    torch.full((batch_size, 1), IGNORE_INDEX, 
-            dtype=input_ids.dtype, device=input_ids.device),        # <BOS> token (忽略)
-    torch.full((batch_size, num * 196), IGNORE_INDEX, 
-            dtype=input_ids.dtype, device=input_ids.device),        # Vision tokens (忽略)
-    action_only_labels,                                  # 只有 Action tokens 参与loss，Text tokens被忽略
-], dim=1)
-```
+## 🚀 3. SwoVLA 项目探索 (SwoVLA Project Exploration)
+
+### 3.1 技术调研
+- [ ] **SwoVLA 架构分析**
+  - [ ] 研究 SwoVLA 的核心创新点
+  - [ ] 分析与 MicroVLA 的差异
+  - [ ] 评估技术可行性
+
+- [ ] **相关论文和代码学习**
+  - [ ] 收集 SwoVLA 相关资料
+  - [ ] 分析关键技术实现
+  - [ ] 总结技术要点和挑战
+
+### 3.2 原型实现
+- [ ] **核心模块实现**
+  - [ ] 实现 SwoVLA 的关键组件
+  - [ ] 适配现有的数据流程
+  - [ ] 保持与 MicroVLA 的兼容性
+
+- [ ] **实验设计**
+  - [ ] 设计对比实验方案
+  - [ ] 准备实验数据集
+  - [ ] 制定评估标准
+
+### 3.3 性能对比
+- [ ] **基准测试**
+  - [ ] 在相同数据集上对比性能
+  - [ ] 分析计算效率差异
+  - [ ] 评估内存使用情况
+
+- [ ] **结果分析**
+  - [ ] 总结性能差异原因
+  - [ ] 分析各自的优缺点
+  - [ ] 形成技术选型建议
+
+## 🔄 4. 项目管理优化
+
+### 4.1 文档完善
+- [ ] **README 更新**
+  - [ ] 添加项目介绍和使用说明
+  - [ ] 更新安装和运行指南
+  - [ ] 添加示例和教程
+
+- [ ] **API 文档**
+  - [ ] 生成代码文档
+  - [ ] 添加使用示例
+  - [ ] 创建开发者指南
+
+---
+
+**备注:** 
+- 每完成一项任务，请在对应的 `[ ]` 中标记为 `[x]`
+- 遇到技术难点时，及时记录和寻求帮助
+- 定期更新此 TODO 列表，保持项目进度透明
