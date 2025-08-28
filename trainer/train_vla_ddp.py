@@ -51,11 +51,9 @@ def init_trained_vlm(config: VLACofig, action_1st: List[float], action_99th: Lis
                                        min_actions=action_1st,
                                        max_actions=action_99th,
                                        bins=config.bins)
-    transformers_model_path = 'MiniMind2-V'
     model = MicroVLA(config, vision_model_path="./model/vision_model/clip-vit-base-patch16", action_tokenizer=action_tokenizer)
-
     if rank == 0: print("Loading pretrained VLM weights...")
-    temp_vlm_model = AutoModelForCausalLM.from_pretrained(transformers_model_path, trust_remote_code=True)
+    temp_vlm_model = AutoModelForCausalLM.from_pretrained('MiniMind2-V', trust_remote_code=True)
     model.load_state_dict({k: v for k, v in temp_vlm_model.state_dict().items()}, strict=False)
     
     del temp_vlm_model; torch.cuda.empty_cache()

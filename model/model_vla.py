@@ -123,19 +123,13 @@ class ActionTokenizer:
         return self.n_bins
     
     @property
-    def bos_token_id(self):
-        """返回 BOS token ID"""
-        return self.tokenizer.bos_token_id
+    def bos_token_id(self): return self.tokenizer.bos_token_id
     
     @property
-    def eos_token_id(self):
-        """返回 EOS token ID"""
-        return self.tokenizer.eos_token_id
+    def eos_token_id(self): return self.tokenizer.eos_token_id
     
     @property
-    def pad_token_id(self):
-        """返回 PAD token ID"""
-        return self.tokenizer.pad_token_id
+    def pad_token_id(self): return self.tokenizer.pad_token_id
 
 
 class VLACofig(VLMConfig):
