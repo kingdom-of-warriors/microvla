@@ -85,7 +85,7 @@ def raw_obs_to_tensor_obs(obs, device):
     # 定义与训练时相同的变换
     stats = load_stats('dataset/meta/stats.json')
     main_tfs = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=stats['image']['mean'],      # [0.485, 0.456, 0.406]
@@ -94,7 +94,7 @@ def raw_obs_to_tensor_obs(obs, device):
     ])
     
     wrist_tfs = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=stats['wrist_image']['mean'], # [0.512, 0.398, 0.321]

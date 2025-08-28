@@ -16,7 +16,7 @@ class LiberoDataset(Dataset):
         self.task_info = load_task_info(task_file_path) # 加载任务信息
         self.stats = load_stats(self.stats_path)
         self.main_tfs = transforms.Compose([
-            transforms.Resize((224, 224)),
+            transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=self.stats['image']['mean'],      # [0.485, 0.456, 0.406]
@@ -24,7 +24,7 @@ class LiberoDataset(Dataset):
             )
         ])
         self.wrist_tfs = transforms.Compose([
-            transforms.Resize((224, 224)),
+            transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=self.stats['wrist_image']['mean'], # [0.512, 0.398, 0.321]
