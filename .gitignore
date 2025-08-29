@@ -8,7 +8,6 @@ sft_data/
 
 # cache
 __pycache__/
-LIBERO/
 .vscode/
 eval_results/
 eval_videos/
