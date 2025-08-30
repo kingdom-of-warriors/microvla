@@ -1,34 +1,34 @@
-from datasets import load_dataset
-from torch.utils.data import Dataset
 import torch
-from torchvision import transforms
-from utils import load_stats, load_task_info
+from torch.utils.data import Dataset
+import torchvision.transforms.v2 as T
+from utils import load_task_info, load_stats
 
-# 1. 加载数据集
-ds = load_dataset("physical-intelligence/libero")['train']
-
-
-# 3. 创建自定义PyTorch Dataset类
 class LiberoDataset(Dataset):
     def __init__(self, ds, task_file_path='dataset/meta/tasks.jsonl', stats_path='dataset/meta/stats.json'):
         self.dataset = ds
         self.stats_path = stats_path
-        self.task_info = load_task_info(task_file_path) # 加载任务信息
+        self.task_info = load_task_info(task_file_path)
         self.stats = load_stats(self.stats_path)
-        self.main_tfs = transforms.Compose([
-            transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=self.stats['image']['mean'],      # [0.485, 0.456, 0.406]
-                std=self.stats['image']['std']         # [0.229, 0.224, 0.225]
+
+        self.same_tfs = T.Compose([T.RandomResizedCrop((224, 224), scale=(0.8, 1.0), ratio=(0.9, 1.1))])
+
+        self.main_tfs = T.Compose([
+            T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            T.ToImage(),
+            T.ToDtype(torch.float32, scale=True),
+            T.Normalize(
+                mean=self.stats['image']['mean'],
+                std=self.stats['image']['std']
             )
         ])
-        self.wrist_tfs = transforms.Compose([
-            transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=self.stats['wrist_image']['mean'], # [0.512, 0.398, 0.321]
-                std=self.stats['wrist_image']['std']    # [0.201, 0.189, 0.243]
+
+        self.wrist_tfs = T.Compose([
+            T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            T.ToImage(),
+            T.ToDtype(torch.float32, scale=True),
+            T.Normalize(
+                mean=self.stats['wrist_image']['mean'],
+                std=self.stats['wrist_image']['std']
             )
         ])
 
@@ -38,30 +38,24 @@ class LiberoDataset(Dataset):
     
     def __getitem__(self, idx):
         sample = self.dataset[idx]
-        
-        image = self.main_tfs(sample['image'])
-        wrist_image = self.wrist_tfs(sample['wrist_image'])
+        image = sample['image']
+        wrist_image = sample['wrist_image']
+
+        transformed_images = self.same_tfs({'image': image, 'wrist_image': wrist_image})
+        final_image = self.main_tfs(transformed_images['image'])
+        final_wrist_image = self.wrist_tfs(transformed_images['wrist_image'])
         state = torch.tensor(sample['state'], dtype=torch.float32)
         actions = torch.tensor(sample['actions'], dtype=torch.float32)
-        # timestamp = sample['timestamp']
-        # frame_index = sample['frame_index']
-        # episode_index = sample['episode_index']
         task_index = sample['task_index']
         
-        # 根据task_index获取任务描述
         task_description = self.task_info.get(task_index, f"Unknown task {task_index}")
         
         return {
-            'image': image,
-            'wrist_image': wrist_image,
+            'image': final_image,
+            'wrist_image': final_wrist_image,
             'state': state,
             'actions': actions,
             'task_description': task_description,
-            # 'task_index': task_index,
-            # 'episode_index': episode_index,
-            # 'frame_index': frame_index,
-            # 'timestamp': timestamp,
-            # 'index': sample['index']
         }
     
     # def compute_and_save_action_quantiles(self, quantiles=[1, 99]):

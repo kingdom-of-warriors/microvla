@@ -9,8 +9,9 @@ from model.model_vla import VLACofig
 class TrainingConfig:
     """训练超参数配置"""
     epochs: int = 20
-    batch_size: int = 32  # 每个GPU的batch size
+    batch_size: int = 32
     learning_rate: float = 1e-5
+    weight_decay: float = 1e-4
     use_wandb: bool = False
     
     # VLA模型相关配置

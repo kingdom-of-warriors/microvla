@@ -28,15 +28,19 @@ class VLATrainer:
     def _init_wandb(self):
         wandb.init(
             project="microvla_debug",
-            name=f"vla_training_ddp_ws{self.world_size}_refactored",
+            name=f"20250831_data_augument",
             config=self.config.__dict__
         )
 
     def setup(self):
         """准备模型、数据和优化器"""
         # 创建模型和分词器
-        action_stats = load_stats('dataset/meta/stats.json')
-        model, self.action_tokenizer = create_vla_model(self.config.vla_config, action_stats, self.rank)
+        action_stats = load_stats('dataset/meta/stats.json')['actions']
+        model, self.action_tokenizer = create_vla_model(self.config.vla_config, 
+                                                        action_stats, 
+                                                        self.rank, 
+                                                        tokenizer_path="model", 
+                                                        ckpt_path="MiniMind2-V")
         model = model.to(self.device)
         self.model = DDP(model, device_ids=[self.local_rank], find_unused_parameters=True)
 
@@ -44,14 +48,13 @@ class VLATrainer:
         self.train_loader, self.val_loader, self.train_sampler = create_dataloaders(
             self.config, self.action_tokenizer, self.rank, self.world_size
         )
-        self.optimizer = optim.AdamW(self.model.parameters(), lr=self.config.learning_rate)
+        self.optimizer = optim.AdamW(self.model.parameters(), lr=self.config.learning_rate, weight_decay=self.config.weight_decay)
 
         if self.rank == 0:
             trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
             print(f"Trainable params per GPU: {trainable_params / 1e6:.3f}M")
 
     def _run_epoch(self, epoch: int):
-        # 训练阶段
         self.train_sampler.set_epoch(epoch)
         self.model.train()
         train_pbar = tqdm(self.train_loader, desc=f"Epoch {epoch+1} [Train]", disable=(self.rank != 0))
@@ -126,7 +129,7 @@ class VLATrainer:
     def _save_checkpoint(self, epoch):
         if self.rank == 0:
             os.makedirs("ckpt", exist_ok=True)
-            checkpoint_path = f"ckpt/vla_epoch_{epoch+1}.pth"
+            checkpoint_path = f"ckpt/en_{epoch+1}.pth"
             torch.save(self.model.module.state_dict(), checkpoint_path)
             print(f"Checkpoint saved to {checkpoint_path}")
 

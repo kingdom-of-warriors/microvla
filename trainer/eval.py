@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -8,14 +9,10 @@ import json
 from transformers import AutoTokenizer
 from torchvision import transforms
 from PIL import Image
-
 # 添加项目路径
 current_dir = os.path.dirname(__file__)
 project_root = os.path.abspath(os.path.join(current_dir, '..'))
-libero_path = os.path.join(project_root, 'LIBERO')
-
 sys.path.append(project_root)
-sys.path.append(libero_path)
 
 from libero.libero import get_libero_path
 from libero.libero.benchmark import get_benchmark
@@ -24,17 +21,18 @@ from libero.libero.utils.time_utils import Timer
 from libero.libero.utils.video_utils import VideoWriter
 
 from model.model_vla import MicroVLA, VLACofig, ActionTokenizer
-from utils import load_stats, load_task_info
+from trainer.model_utils import create_vla_model
+from utils import load_stats
 
 def parse_args():
     """参数解析，无需改动"""
     parser = argparse.ArgumentParser(description="VLA Model Evaluation Script")
-    parser.add_argument("--checkpoint_path", type=str, required=True, help="Path to the trained VLA model checkpoint")
-    parser.add_argument("--model_config_path", type=str, default="./model", help="Path to the model configuration")
+    parser.add_argument("--ckpt_path", type=str, required=True, help="Path to the trained VLA model checkpoint")
+    parser.add_argument("--tokenizer_path", type=str, default="./model", help="Path to the tokenizer")
     parser.add_argument("--benchmark", type=str, default="libero_object", choices=["libero_10", "libero_spatial", "libero_object", "libero_goal"], help="LIBERO benchmark to evaluate on")
-    parser.add_argument("--task_id", type=int, default=2, help="Specific task ID to evaluate (0-9)")
+    parser.add_argument("--task_id", type=int, default=0, help="Specific task ID to evaluate (0-9)")
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to run evaluation on")
-    parser.add_argument("--num_episodes", type=int, default=1, help="Number of episodes to evaluate")
+    parser.add_argument("--num_episodes", type=int, default=10, help="Number of episodes to evaluate")
     parser.add_argument("--max_steps", type=int, default=350, help="Maximum steps per episode")
     parser.add_argument("--save_videos", action="store_true", help="Save evaluation videos")
     parser.add_argument("--video_dir", type=str, default="./eval_videos", help="Directory to save videos")
@@ -82,7 +80,6 @@ def load_vla_model(checkpoint_path, model_config_path, device):
 
 def raw_obs_to_tensor_obs(obs, device):
     """将【单个】原始观测转换为模型输入格式（batch_size=1）。"""
-    # 定义与训练时相同的变换
     stats = load_stats('dataset/meta/stats.json')
     main_tfs = transforms.Compose([
         transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
@@ -115,9 +112,7 @@ def raw_obs_to_tensor_obs(obs, device):
     
     return pixel_values.unsqueeze(0).to(device)
 
-
 def evaluate_task(model: MicroVLA, task, args):
-    """评估单个任务（串行版本）"""
     print(f"Evaluating task: {task.language}")
     
     env_args = {
@@ -128,13 +123,11 @@ def evaluate_task(model: MicroVLA, task, args):
     
     env = OffScreenRenderEnv(**env_args)
     env.seed(args.seed)
-    
     init_states_path = os.path.join(get_libero_path("init_states"), task.problem_folder, task.init_states_file)
     init_states = torch.load(init_states_path)
     
     num_success = 0
     total_steps = 0
-    
     video_base_dir = os.path.join(args.video_dir, f"task_{args.task_id}")
 
     for episode in tqdm(range(args.num_episodes), desc=f"Task {args.task_id} Episodes"):
@@ -148,29 +141,23 @@ def evaluate_task(model: MicroVLA, task, args):
             obs = env.set_init_state(init_state)
 
             for _ in range(5): obs, _, _, _ = env.step(np.zeros(7))
-            done = False
 
             if args.save_videos:
-                video_writer.append_obs(obs, done, idx=0, camera_name="agentview_image")
+                video_writer.append_obs(obs, done=False, idx=0, camera_name="agentview_image")
 
             for step in range(args.max_steps):
                 pixel_values = raw_obs_to_tensor_obs(obs, args.device)
-                actions_batch1 = model.predict_action_kv_cache(pixel_values, task.language)
-                # actions_batch2 = model.predict_action(pixel_values, task.language)
-                action1 = actions_batch1[0]
-                # action2 = actions_batch2[0]
-                action = action1
+                actions_batch = model.predict_action_kv_cache(pixel_values, task.language)
+                action = actions_batch[0]
                 obs, reward, done, info = env.step(action)
-                print(step, done)
                 total_steps += 1
                 
                 if args.save_videos:
                     video_writer.append_obs(obs, done, idx=0, camera_name="agentview_image")
 
                 if done:
-                    if info.get("success", False):
-                        num_success += 1
-                    break 
+                    num_success += 1
+                    break
         
         current_rate = num_success / (episode + 1)
         tqdm.write(f"Episode {episode + 1}/{args.num_episodes} finished. Current success rate: {current_rate:.2f}")
@@ -190,19 +177,27 @@ def evaluate_task(model: MicroVLA, task, args):
 
 def main():
     args = parse_args()
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    os.makedirs(args.results_dir, exist_ok=True)
-    os.makedirs(args.video_dir, exist_ok=True)
-    
-    model = load_vla_model(args.checkpoint_path, args.model_config_path, args.device)
+    np.random.seed(args.seed); torch.manual_seed(args.seed)
+    os.makedirs(args.results_dir, exist_ok=True); os.makedirs(args.video_dir, exist_ok=True)
+
+    config = VLACofig(hidden_size=768, num_hidden_layers=16, max_seq_len=8192, bins=256)
+    config.map_path = 'model/action_token_map_256_new.json'
+    config.stats_path = 'dataset/meta/stats.json'
+    model = create_vla_model(
+        config=config,
+        action_stats=load_stats(config.stats_path)['actions'],
+        rank=0,
+        tokenizer_path=args.tokenizer_path,
+        ckpt_path=args.ckpt_path
+    )[0].to(args.device)
+
+    # model = load_vla_model(args.ckpt_path, args.model_config_path, args.device)
     
     benchmark_map = {"libero_10": "LIBERO_10", "libero_spatial": "LIBERO_SPATIAL", "libero_object": "LIBERO_OBJECT", "libero_goal": "LIBERO_GOAL"}
     benchmark = get_benchmark(benchmark_map[args.benchmark])(0)
     task = benchmark.get_task(args.task_id)
     print(f"Starting evaluation on {args.benchmark} task {args.task_id}")
     with Timer() as timer:
-        # evaluate_task的调用保持不变
         results = evaluate_task(model, task, args)
     
     results['evaluation_time'] = timer.get_elapsed_time()
