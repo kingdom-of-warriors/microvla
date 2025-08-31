@@ -7,7 +7,6 @@ import torch
 from tqdm import tqdm
 import json
 from transformers import AutoTokenizer
-from torchvision import transforms
 from PIL import Image
 # 添加项目路径
 current_dir = os.path.dirname(__file__)
@@ -23,6 +22,7 @@ from libero.libero.utils.video_utils import VideoWriter
 from model.model_vla import MicroVLA, VLACofig, ActionTokenizer
 from trainer.model_utils import create_vla_model
 from utils import load_stats
+from dataset.vla_dataset import raw_obs_to_tensor_obs
 
 def parse_args():
     """参数解析，无需改动"""
@@ -71,46 +71,11 @@ def load_vla_model(checkpoint_path, model_config_path, device):
     print(f"Loading checkpoint from {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint, strict=False)
-    
     model.to(device)
     model.eval()
     
     print("VLA model loaded successfully.")
     return model
-
-def raw_obs_to_tensor_obs(obs, device):
-    """将【单个】原始观测转换为模型输入格式（batch_size=1）。"""
-    stats = load_stats('dataset/meta/stats.json')
-    main_tfs = transforms.Compose([
-        transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=stats['image']['mean'],      # [0.485, 0.456, 0.406]
-            std=stats['image']['std']         # [0.229, 0.224, 0.225]
-        )
-    ])
-    
-    wrist_tfs = transforms.Compose([
-        transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=stats['wrist_image']['mean'], # [0.512, 0.398, 0.321]
-            std=stats['wrist_image']['std']    # [0.201, 0.189, 0.243]
-        )
-    ])
-    
-    agentview_img = obs['agentview_image'][::-1].copy()
-    agentview_img = Image.fromarray(agentview_img.astype('uint8'))
-    agentview_img = main_tfs(agentview_img)
-
-    wrist_img = obs['robot0_eye_in_hand_image'][::-1].copy()
-    wrist_img = Image.fromarray(wrist_img.astype('uint8'))
-    wrist_img = wrist_tfs(wrist_img)
-
-    # 堆叠成 [2, 3, H, W] 并添加 batch 维度
-    pixel_values = torch.stack([agentview_img, wrist_img])
-    
-    return pixel_values.unsqueeze(0).to(device)
 
 def evaluate_task(model: MicroVLA, task, args):
     print(f"Evaluating task: {task.language}")
