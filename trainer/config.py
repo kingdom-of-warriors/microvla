@@ -18,9 +18,8 @@ class TrainingConfig:
     vla_config: VLACofig = field(default_factory=lambda: VLACofig(
         hidden_size=768, 
         num_hidden_layers=16, 
-        max_seq_len=8192, 
         bins=256,
-        map_path='model/action_token_map_256_new.json'
+        map_path='model/action_token_map_256.json'
     ))
     
     # 数据集相关配置

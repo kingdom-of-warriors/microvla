@@ -28,7 +28,7 @@ class VLATrainer:
     def _init_wandb(self):
         wandb.init(
             project="microvla_debug",
-            name=f"20250831_data_augument",
+            name=f"20250831_state",
             config=self.config.__dict__
         )
 
@@ -129,7 +129,7 @@ class VLATrainer:
     def _save_checkpoint(self, epoch):
         if self.rank == 0:
             os.makedirs("ckpt", exist_ok=True)
-            checkpoint_path = f"ckpt/en_{epoch+1}.pth"
+            checkpoint_path = f"ckpt/state/en_{epoch+1}.pth"
             torch.save(self.model.module.state_dict(), checkpoint_path)
             print(f"Checkpoint saved to {checkpoint_path}")
 

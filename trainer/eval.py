@@ -47,8 +47,8 @@ def load_vla_model(checkpoint_path, model_config_path, device):
     print("Loading VLA model...")
     
     # 创建配置
-    config = VLACofig(hidden_size=768, num_hidden_layers=16, max_seq_len=8192, bins=256)
-    config.map_path = 'model/action_token_map_256_new.json'
+    config = VLACofig(hidden_size=768, num_hidden_layers=16, bins=256)
+    config.map_path = 'model/action_token_map_256.json'
     config.stats_path = 'dataset/meta/stats.json'
 
     tokenizer = AutoTokenizer.from_pretrained(model_config_path)
@@ -180,9 +180,7 @@ def main():
     np.random.seed(args.seed); torch.manual_seed(args.seed)
     os.makedirs(args.results_dir, exist_ok=True); os.makedirs(args.video_dir, exist_ok=True)
 
-    config = VLACofig(hidden_size=768, num_hidden_layers=16, max_seq_len=8192, bins=256)
-    config.map_path = 'model/action_token_map_256_new.json'
-    config.stats_path = 'dataset/meta/stats.json'
+    config = VLACofig(map_path='model/action_token_map_256.json', stats_path='dataset/meta/stats.json')
     model = create_vla_model(
         config=config,
         action_stats=load_stats(config.stats_path)['actions'],
@@ -190,8 +188,6 @@ def main():
         tokenizer_path=args.tokenizer_path,
         ckpt_path=args.ckpt_path
     )[0].to(args.device)
-
-    # model = load_vla_model(args.ckpt_path, args.model_config_path, args.device)
     
     benchmark_map = {"libero_10": "LIBERO_10", "libero_spatial": "LIBERO_SPATIAL", "libero_object": "LIBERO_OBJECT", "libero_goal": "LIBERO_GOAL"}
     benchmark = get_benchmark(benchmark_map[args.benchmark])(0)

@@ -137,20 +137,20 @@ class VLACofig(VLMConfig):
 
     def __init__(
             self,
-            image_special_token: str = '@' * 196,
-            image_ids: List = [34] * 196,
-            map_path: str = 'model/action_token_map.json',
+            map_path: str = 'model/action_token_map_256.json',
             stats_path: str = 'dataset/stats.json',
             task_file_path: str = 'dataset/meta/tasks.jsonl',
             bins: int = 256,
+            state_dim: int = 8,
+            use_state: bool = True,  # 是否使用本体感知
             **kwargs,
     ):
-        self.image_special_token = image_special_token
-        self.image_ids = image_ids
         self.map_path = map_path
         self.stats_path = stats_path
         self.bins = bins
         self.task_file_path = task_file_path
+        self.state_dim = state_dim
+        self.use_state = use_state
         super().__init__(**kwargs)
 
 
@@ -162,6 +162,16 @@ class MicroVLA(MiniMindVLM):
         if not params: params = VLACofig()
         self.params = params
         self.action_tokenizer = action_tokenizer
+        if self.params.use_state:
+            self.state_projector = nn.Sequential(
+                nn.Linear(self.params.state_dim, self.params.hidden_size),
+                nn.SiLU(),
+                nn.Dropout(self.params.dropout),
+                nn.Linear(self.params.hidden_size, self.params.hidden_size),
+                RMSNorm(self.params.hidden_size, eps=self.params.rms_norm_eps)
+            )
+        else:
+            self.state_projector = None
 
     def forward(self, 
                 input_ids: Optional[torch.Tensor] = None,    # [bs, seq_len] 
@@ -169,6 +179,7 @@ class MicroVLA(MiniMindVLM):
                 past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None, 
                 use_cache: bool = False, 
                 pixel_values: Optional[torch.FloatTensor] = None, # [bs, num, c, im_h, im_w] 
+                state_values: Optional[torch.FloatTensor] = None, # [bs, state_dim]
                 use_text_token: bool = False, 
                 **args) -> CausalLMOutputWithPast:
 
@@ -189,24 +200,55 @@ class MicroVLA(MiniMindVLM):
                 vision_features_list.append(img_features) 
             vision_tensors = torch.cat(vision_features_list, dim=1)  # [bs, num_img*196, hidden_size] 
 
-            # 3. 按顺序拼接: <bos> + vision_features + remaining_tokens 
-            hidden_states = torch.cat([ 
-                hidden_states[:, 0:1, :],        # [bs, 1, hidden_size] 
-                vision_tensors,                  # [bs, num_img*196, hidden_size] 
-                hidden_states[:, 1:, :]          # [bs, seq_len-1, hidden_size] 
-            ], dim=1)
-            
-            # 4. 创建对应的拼接后 attention_mask
-            vision_attention_mask = torch.ones( 
-                (bs, vision_tensors.shape[1]),  
-                dtype=attention_mask.dtype,  
-                device=attention_mask.device 
-            ) 
-            attention_mask = torch.cat([ 
-                attention_mask[:, 0:1],          # <bos> 的 mask 
-                vision_attention_mask,           # 图像 token 的 mask 
-                attention_mask[:, 1:]            # 原始文本 token 的 mask 
-            ], dim=1)
+            # 3. 处理本体感知信息（新增）
+            state_tensors = None
+            if self.params.use_state and state_values is not None:
+                state_features = self.state_projector(state_values)  # [bs, state_proj_dim]
+                state_tensors = state_features.unsqueeze(1)  # [bs, 1, state_proj_dim]
+
+            # 4. 按顺序拼接
+            if state_tensors is not None: # 使用state
+                hidden_states = torch.cat([ 
+                    hidden_states[:, 0:1, :],        # <bos>
+                    vision_tensors,                  # vision tokens
+                    state_tensors,                   # state token (新增)
+                    hidden_states[:, 1:, :]          # remaining tokens
+                ], dim=1)
+                
+                # 5. 创建对应的 attention_mask
+                vision_attention_mask = torch.ones( 
+                    (bs, vision_tensors.shape[1]),  
+                    dtype=attention_mask.dtype,  
+                    device=attention_mask.device 
+                )
+                state_attention_mask = torch.ones(
+                    (bs, 1),  # state 只有1个token
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device
+                )
+                attention_mask = torch.cat([ 
+                    attention_mask[:, 0:1],          # <bos> mask
+                    vision_attention_mask,           # vision mask
+                    state_attention_mask,            # state mask (新增)
+                    attention_mask[:, 1:]            # remaining mask
+                ], dim=1)
+            else: # 不使用 state
+                hidden_states = torch.cat([ 
+                    hidden_states[:, 0:1, :],
+                    vision_tensors,
+                    hidden_states[:, 1:, :]
+                ], dim=1)
+                
+                vision_attention_mask = torch.ones( 
+                    (bs, vision_tensors.shape[1]),  
+                    dtype=attention_mask.dtype,  
+                    device=attention_mask.device 
+                ) 
+                attention_mask = torch.cat([ 
+                    attention_mask[:, 0:1],
+                    vision_attention_mask,
+                    attention_mask[:, 1:]
+                ], dim=1)
             
         # 利用已有的 KV 缓存，只需处理新的 token(s)，`attention_mask` 应该由外部的生成循环更新并传入
         else:
@@ -237,10 +279,13 @@ class MicroVLA(MiniMindVLM):
             bs, _ = input_ids.shape
             
             # label类型1：创建只包含 text + action 的标签序列
+            vision_tokens_len = vision_tensors.shape[1]
+            state_tokens_len = 1 if (self.params.use_state and state_values is not None) else 0
+            prefix_len = 1 + vision_tokens_len + state_tokens_len  # <BOS> + vision + state
+            
             text_labels = input_ids[:, 1:].clone()
-            text_attention = attention_mask[:, 1 + vision_tensors.shape[1]:]
+            text_attention = attention_mask[:, prefix_len:]
             text_labels[text_attention == 0] = IGNORE_INDEX
-            # 忽略 <BOS> 和 Vision tokens
             full_labels1 = torch.cat([ 
                 torch.full((bs, 1 + vision_tensors.shape[1]), 
                            IGNORE_INDEX, 
@@ -250,14 +295,11 @@ class MicroVLA(MiniMindVLM):
             ], dim=1) 
 
             # label类型2：创建只包含 action 的标签序列
-            # a. 忽略 text token
             action_only_labels = text_labels.clone() 
             action_mask = torch.zeros_like(action_only_labels, dtype=torch.bool) 
             action_token_ids = set(self.action_tokenizer.action_to_token_id.values()) 
             for token_id in action_token_ids: action_mask |= (action_only_labels == token_id) 
             action_only_labels[~action_mask] = IGNORE_INDEX 
-            
-            # b. 忽略 <BOS> 和 Vision tokens
             full_labels2 = torch.cat([ 
                 torch.full((bs, 1 + vision_tensors.shape[1]), 
                            IGNORE_INDEX, 
@@ -266,7 +308,6 @@ class MicroVLA(MiniMindVLM):
                 action_only_labels,
             ], dim=1) 
 
-            
             full_labels = full_labels1 if use_text_token else full_labels2 # 根据 use_text_token 选择用哪个标签计算Loss
 
             shift_logits = logits[:, :-1, :].contiguous()   # 预测：位置 0 到 n-1 
@@ -285,7 +326,7 @@ class MicroVLA(MiniMindVLM):
         return self.OUT
 
     @torch.no_grad()
-    def predict_action_kv_cache(self, pixel_values: torch.FloatTensor, task_description: str):
+    def predict_action_kv_cache(self, pixel_values: torch.FloatTensor, state_values: Optional[torch.FloatTensor], task_description: str):
         """
         使用 VLA 模型【自回归地】预测一个完整的动作序列。
         """
@@ -317,11 +358,12 @@ class MicroVLA(MiniMindVLM):
         for _ in range(action_dims):
             attention_mask = torch.ones_like(input_ids)
             outputs = self.forward(
-                pixel_values=pixel_values,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 use_cache=True,
+                pixel_values=pixel_values,
+                state_values=state_values
             )
 
             next_token_logits = outputs.logits[:, -1, :]
@@ -332,7 +374,8 @@ class MicroVLA(MiniMindVLM):
             input_ids = predicted_token_id.unsqueeze(1)
             past_key_values = outputs.past_key_values
             pixel_values = None # 在第一次迭代后，不再需要传入图像，其信息已在past_key_values中
-
+            state_values = None 
+            
         # 3. 将所有生成的动作token ID拼接起来
         action_token_ids_tensor = torch.cat(generated_action_ids, dim=1)
         actions_np = self.action_tokenizer.decode_token_ids_to_actions(
