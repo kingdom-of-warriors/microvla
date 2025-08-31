@@ -19,6 +19,8 @@ def load_stats(stats_path: str = 'dataset/meta/stats.json'):
     image_std = [stats['image']['std'][i][0][0] for i in range(3)]
     wrist_mean = [stats['wrist_image']['mean'][i][0][0] for i in range(3)]
     wrist_std = [stats['wrist_image']['std'][i][0][0] for i in range(3)]
+    state_mean = stats['state']['mean']
+    state_std = stats['state']['std']
     actions_stats = stats['actions']
     return {
         'image': {
@@ -32,5 +34,9 @@ def load_stats(stats_path: str = 'dataset/meta/stats.json'):
         'actions': {
             '1st': actions_stats['1st_percentile'],
             '99th': actions_stats['99th_percentile']
+        },
+        'state':{
+            'mean': state_mean,
+            'std': state_std
         }
     }
