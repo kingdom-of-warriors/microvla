@@ -90,7 +90,9 @@ class VLATrainer:
                 pixel_values = batch['pixel_values'].to(self.device)
                 input_ids = batch['input_ids'].to(self.device)
                 attention_mask = batch['attention_mask'].to(self.device)
-                outputs = self.model(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask)
+                state_values = batch['state_values'].to(self.device)
+
+                outputs = self.model(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask, state_values=state_values)
                 val_loss_sum += outputs.loss.item()
                 acc = compute_action_accuracy(outputs, batch, self.action_tokenizer)
                 if acc is not None:
