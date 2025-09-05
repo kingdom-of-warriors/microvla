@@ -3,6 +3,7 @@ from torch.utils.data import Dataset
 import torchvision.transforms.v2 as T
 from PIL import Image
 from utils import load_task_info, load_stats
+import numpy as np
 
 class LiberoDataset(Dataset):
     def __init__(self, ds, task_file_path='dataset/meta/tasks.jsonl', stats_path='dataset/meta/stats.json'):
@@ -11,9 +12,9 @@ class LiberoDataset(Dataset):
         self.task_info = load_task_info(task_file_path)
         self.stats = load_stats(self.stats_path)
         # 图像增强以及归一化
-        self.same_tfs = T.Compose([T.RandomResizedCrop((224, 224), scale=(0.8, 1.0), ratio=(0.9, 1.1))])
+        self.same_tfs = T.Compose([T.RandomResizedCrop((224, 224), scale=(0.95, 1.0), ratio=(0.95, 1.05))])
         self.main_tfs = T.Compose([
-            T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            T.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),
             T.ToImage(),
             T.ToDtype(torch.float32, scale=True),
             T.Normalize(
@@ -22,7 +23,7 @@ class LiberoDataset(Dataset):
             )
         ])
         self.wrist_tfs = T.Compose([
-            T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            T.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),
             T.ToImage(),
             T.ToDtype(torch.float32, scale=True),
             T.Normalize(
@@ -63,7 +64,6 @@ class LiberoDataset(Dataset):
         }
     
 
-# 需要添加处理state的代码！
 def raw_obs_to_tensor_obs(obs, device):
     """将【单个Libero】原始观测转换为模型输入格式（batch_size=1）。"""
     stats = load_stats('dataset/meta/stats.json')
@@ -87,15 +87,31 @@ def raw_obs_to_tensor_obs(obs, device):
         )
     ])
     
+    # 构建8维state：7维关节角度 + 1维夹爪状态(-a)
+    joint_pos = obs['robot0_joint_pos'] 
+    gripper_qpos = obs['robot0_gripper_qpos']
+    state = np.concatenate([joint_pos[:6], gripper_qpos])
+    
+    # state归一化
+    state_mean = torch.tensor(stats['state']['mean'], dtype=torch.float32)
+    state_std = torch.tensor(stats['state']['std'], dtype=torch.float32)
+    state_tensor = torch.tensor(state, dtype=torch.float32)
+    normalized_state = (state_tensor - state_mean) / state_std
+    state_values = normalized_state.unsqueeze(0).to(device)  # [1, 8]
+    
+    # 图像处理
     agentview_img = obs['agentview_image'][::-1].copy()
     agentview_img = Image.fromarray(agentview_img.astype('uint8'))
     agentview_img = main_tfs(agentview_img)
+    
     wrist_img = obs['robot0_eye_in_hand_image'][::-1].copy()
     wrist_img = Image.fromarray(wrist_img.astype('uint8'))
     wrist_img = wrist_tfs(wrist_img)
-    pixel_values = torch.stack([agentview_img, wrist_img])
     
-    return pixel_values.unsqueeze(0).to(device)
+    pixel_values = torch.stack([agentview_img, wrist_img])
+    pixel_values = pixel_values.unsqueeze(0).to(device)  # [1, 2, 3, 224, 224]
+    
+    return pixel_values, state_values
     
     # def compute_and_save_action_quantiles(self, quantiles=[1, 99]):
     #     """

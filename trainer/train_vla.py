@@ -28,7 +28,7 @@ class VLATrainer:
     def _init_wandb(self):
         wandb.init(
             project="microvla_debug",
-            name=f"20250831_state",
+            name=f"20250905_state",
             config=self.config.__dict__
         )
 
@@ -66,8 +66,9 @@ class VLATrainer:
             pixel_values = batch['pixel_values'].to(self.device)
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
+            state_values = batch['state_values'].to(self.device)
             
-            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, pixel_values=pixel_values, use_text_token=False)
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, pixel_values=pixel_values, state_values=state_values)
             loss = outputs.loss
             loss.backward()
             self.optimizer.step()

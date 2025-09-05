@@ -202,12 +202,12 @@ class MicroVLA(MiniMindVLM):
 
             # 3. 处理本体感知信息（新增）
             state_tensors = None
-            if self.params.use_state and state_values is not None:
+            if self.params.use_state:
                 state_features = self.state_projector(state_values)  # [bs, state_proj_dim]
                 state_tensors = state_features.unsqueeze(1)  # [bs, 1, state_proj_dim]
 
             # 4. 按顺序拼接
-            if state_tensors is not None: # 使用state
+            if self.params.use_state: # 使用state
                 hidden_states = torch.cat([ 
                     hidden_states[:, 0:1, :],        # <bos>
                     vision_tensors,                  # vision tokens
@@ -280,14 +280,14 @@ class MicroVLA(MiniMindVLM):
             
             # label类型1：创建只包含 text + action 的标签序列
             vision_tokens_len = vision_tensors.shape[1]
-            state_tokens_len = 1 if (self.params.use_state and state_values is not None) else 0
+            state_tokens_len = 1 if self.params.use_state else 0
             prefix_len = 1 + vision_tokens_len + state_tokens_len  # <BOS> + vision + state
             
             text_labels = input_ids[:, 1:].clone()
             text_attention = attention_mask[:, prefix_len:]
             text_labels[text_attention == 0] = IGNORE_INDEX
             full_labels1 = torch.cat([ 
-                torch.full((bs, 1 + vision_tensors.shape[1]), 
+                torch.full((bs, prefix_len), 
                            IGNORE_INDEX, 
                            dtype=input_ids.dtype, 
                            device=input_ids.device),
@@ -301,7 +301,7 @@ class MicroVLA(MiniMindVLM):
             for token_id in action_token_ids: action_mask |= (action_only_labels == token_id) 
             action_only_labels[~action_mask] = IGNORE_INDEX 
             full_labels2 = torch.cat([ 
-                torch.full((bs, 1 + vision_tensors.shape[1]), 
+                torch.full((bs, prefix_len), 
                            IGNORE_INDEX, 
                            dtype=input_ids.dtype, 
                            device=input_ids.device),
@@ -309,7 +309,6 @@ class MicroVLA(MiniMindVLM):
             ], dim=1) 
 
             full_labels = full_labels1 if use_text_token else full_labels2 # 根据 use_text_token 选择用哪个标签计算Loss
-
             shift_logits = logits[:, :-1, :].contiguous()   # 预测：位置 0 到 n-1 
             shift_labels = full_labels[:, 1:].contiguous()  # 目标：位置 1 到 n
             loss_fct = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX) 
@@ -326,7 +325,7 @@ class MicroVLA(MiniMindVLM):
         return self.OUT
 
     @torch.no_grad()
-    def predict_action_kv_cache(self, pixel_values: torch.FloatTensor, state_values: Optional[torch.FloatTensor], task_description: str):
+    def predict_action_kv_cache(self, pixel_values: torch.FloatTensor, task_description: str, state_values: Optional[torch.FloatTensor] = None):
         """
         使用 VLA 模型【自回归地】预测一个完整的动作序列。
         """
@@ -377,15 +376,15 @@ class MicroVLA(MiniMindVLM):
             state_values = None 
             
         # 3. 将所有生成的动作token ID拼接起来
-        action_token_ids_tensor = torch.cat(generated_action_ids, dim=1)
+        action_token_ids = torch.cat(generated_action_ids, dim=1)
         actions_np = self.action_tokenizer.decode_token_ids_to_actions(
-            action_token_ids_tensor.cpu().numpy()
+            action_token_ids.cpu().numpy()
         )
         
         return actions_np
     
     @torch.no_grad()
-    def predict_action(self, pixel_values: torch.FloatTensor, task_description: str):
+    def predict_action(self, pixel_values: torch.FloatTensor, task_description: str, state_values: Optional[torch.FloatTensor] = None):
         """
         使用 VLA 模型【自回归地】预测一个完整的动作序列。
         【注意】此版本不使用 KV 缓存，效率较低，主要用于调试或对比。
@@ -413,6 +412,7 @@ class MicroVLA(MiniMindVLM):
             attention_mask = torch.ones_like(generated_ids)
             outputs = self.forward(
                 pixel_values=pixel_values,
+                state_values=state_values,
                 input_ids=generated_ids,
                 attention_mask=attention_mask,
                 use_cache=False,

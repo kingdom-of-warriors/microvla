@@ -28,14 +28,14 @@ def _split_dataset_by_episode(dataset: Dataset, train_ratio=0.8, rank=0) -> Tupl
 
 def _collate_fn(batch, action_tokenizer: ActionTokenizer, max_length: int) -> Dict[str, torch.Tensor]:
     """数据collate函数"""
-    pixel_values_list, input_ids_list, attention_mask_list = [], [], []
+    pixel_values_list, input_ids_list, state_list, attention_mask_list = [], [], [], []
     bos_id, eos_id, pad_id = action_tokenizer.bos_token_id, action_tokenizer.eos_token_id, action_tokenizer.pad_token_id
     
     for sample in batch:
         # 1. 堆叠图像张量
         pixel_values = torch.stack([sample['image'], sample['wrist_image']]) # (2, C, H, W)
         pixel_values_list.append(pixel_values)
-        # 2. 获得文本和动作的输入ID：<bos> + text tokens + action tokens + <eos> + <pad>
+        # 2. 获得文本和动作的输入ID：<bos> + text tokens + action tokens + state tokens + <eos> + <pad>
         instruction_ids = action_tokenizer.tokenizer.encode(sample['task_description'], add_special_tokens=False)
         action_ids = action_tokenizer.encode(sample['actions'].numpy())
         input_ids = [bos_id] + instruction_ids + list(action_ids) + [eos_id]
@@ -50,8 +50,14 @@ def _collate_fn(batch, action_tokenizer: ActionTokenizer, max_length: int) -> Di
         input_ids_list.append(torch.tensor(input_ids, dtype=torch.long))
         # 3. 注意力掩码堆叠
         attention_mask_list.append(torch.tensor(attention_mask, dtype=torch.long))
-
-    return {'pixel_values': torch.stack(pixel_values_list), 'input_ids': torch.stack(input_ids_list), 'attention_mask': torch.stack(attention_mask_list)}
+        # 4. 状态张量堆叠
+        state_list.append(sample['state'])
+    return {
+        'pixel_values': torch.stack(pixel_values_list), 
+        'input_ids': torch.stack(input_ids_list), 
+        'attention_mask': torch.stack(attention_mask_list),
+        'state_values': torch.stack(state_list)
+    }
 
 def create_dataloaders(config, action_tokenizer, rank, world_size) -> Tuple[DataLoader, DataLoader, DistributedSampler]:
     """创建训练和验证数据加载器"""
