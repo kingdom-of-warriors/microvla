@@ -61,7 +61,6 @@ def evaluate_task(model: MicroVLA, task, args):
         
         with VideoWriter(episode_video_dir, args.save_videos) as video_writer:
             obs = env.reset()
-            
             init_state_idx = episode % len(init_states)
             init_state = init_states[init_state_idx]
             obs = env.set_init_state(init_state)
@@ -72,7 +71,7 @@ def evaluate_task(model: MicroVLA, task, args):
 
             for step in range(args.max_steps):
                 pixel_values, state = raw_obs_to_tensor_obs(obs, args.device)
-                actions_batch = model.predict_action_kv_cache(pixel_values, task.language, state)
+                actions_batch = model.predict_action(pixel_values, task.language, state)
                 action = actions_batch[0]
                 obs, reward, done, info = env.step(action)
                 total_steps += 1

@@ -4,33 +4,67 @@ import torchvision.transforms.v2 as T
 from PIL import Image
 from utils import load_task_info, load_stats
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 class LiberoDataset(Dataset):
-    def __init__(self, ds, task_file_path='dataset/meta/tasks.jsonl', stats_path='dataset/meta/stats.json'):
+    def __init__(self, ds, task_file_path='dataset/meta/tasks.jsonl', stats_path='dataset/meta/stats.json', 
+                 augment=False):
+        """
+        Args:
+            ds: 数据集
+            task_file_path: 任务信息文件路径
+            stats_path: 统计信息文件路径
+            no_augment: 是否禁用数据增强，True表示不使用数据增强
+        """
         self.dataset = ds
         self.stats_path = stats_path
         self.task_info = load_task_info(task_file_path)
         self.stats = load_stats(self.stats_path)
-        # 图像增强以及归一化
-        self.same_tfs = T.Compose([T.RandomResizedCrop((224, 224), scale=(0.95, 1.0), ratio=(0.95, 1.05))])
-        self.main_tfs = T.Compose([
-            T.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),
-            T.ToImage(),
-            T.ToDtype(torch.float32, scale=True),
-            T.Normalize(
-                mean=self.stats['image']['mean'],
-                std=self.stats['image']['std']
-            )
-        ])
-        self.wrist_tfs = T.Compose([
-            T.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),
-            T.ToImage(),
-            T.ToDtype(torch.float32, scale=True),
-            T.Normalize(
-                mean=self.stats['wrist_image']['mean'],
-                std=self.stats['wrist_image']['std']
-            )
-        ])
+        self.augment = augment
+        
+        # 根据 no_augment 参数选择不同的图像变换
+        if not self.augment:
+            self.same_tfs = T.Compose([
+                T.Resize((224, 224))
+            ])
+            self.main_tfs = T.Compose([
+                T.ToImage(),
+                T.ToDtype(torch.float32, scale=True),
+                T.Normalize(
+                    mean=self.stats['image']['mean'],
+                    std=self.stats['image']['std']
+                )
+            ])
+            self.wrist_tfs = T.Compose([
+                T.ToImage(),
+                T.ToDtype(torch.float32, scale=True),
+                T.Normalize(
+                    mean=self.stats['wrist_image']['mean'],
+                    std=self.stats['wrist_image']['std']
+                )
+            ])
+        else:
+            self.same_tfs = T.Compose([
+                T.RandomResizedCrop((224, 224), scale=(0.95, 1.0), ratio=(0.95, 1.05))
+            ])
+            self.main_tfs = T.Compose([
+                T.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),
+                T.ToImage(),
+                T.ToDtype(torch.float32, scale=True),
+                T.Normalize(
+                    mean=self.stats['image']['mean'],
+                    std=self.stats['image']['std']
+                )
+            ])
+            self.wrist_tfs = T.Compose([
+                T.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),
+                T.ToImage(),
+                T.ToDtype(torch.float32, scale=True),
+                T.Normalize(
+                    mean=self.stats['wrist_image']['mean'],
+                    std=self.stats['wrist_image']['std']
+                )
+            ])
 
         # state 归一化参数
         self.state_mean = torch.tensor(self.stats['state']['mean'], dtype=torch.float32)
@@ -43,14 +77,15 @@ class LiberoDataset(Dataset):
         sample = self.dataset[idx]
         image = sample['image']
         wrist_image = sample['wrist_image']
+        
         # 图像处理
         transformed_images = self.same_tfs({'image': image, 'wrist_image': wrist_image})
         final_image = self.main_tfs(transformed_images['image'])
         final_wrist_image = self.wrist_tfs(transformed_images['wrist_image'])
+        
         # state 处理
         state = torch.tensor(sample['state'], dtype=torch.float32)
         normalized_state = (state - self.state_mean) / self.state_std
-
         actions = torch.tensor(sample['actions'], dtype=torch.float32)
         task_index = sample['task_index']
         task_description = self.task_info.get(task_index, f"Unknown task {task_index}")
@@ -87,10 +122,13 @@ def raw_obs_to_tensor_obs(obs, device):
         )
     ])
     
-    # 构建8维state：7维关节角度 + 1维夹爪状态(-a)
-    joint_pos = obs['robot0_joint_pos'] 
+    # 构建8维state： "x", "y", "z", "roll", "pitch", "yaw", "gripper", "-gripper"
+    ee_pos = obs['robot0_eef_pos'] 
+    ee_quat = obs['robot0_eef_quat']
+    # "wxyz" to "xyzw" for scipy rotation
+    ee_euler = Rotation.from_quat(np.array([ee_quat[1], ee_quat[2], ee_quat[3], ee_quat[0]])).as_euler('xyz', degrees=False)
     gripper_qpos = obs['robot0_gripper_qpos']
-    state = np.concatenate([joint_pos[:6], gripper_qpos])
+    state = np.concatenate((ee_pos, ee_euler, gripper_qpos), axis=0)
     
     # state归一化
     state_mean = torch.tensor(stats['state']['mean'], dtype=torch.float32)
